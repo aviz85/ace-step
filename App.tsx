@@ -66,6 +66,7 @@ export default function App() {
   // UI State
   const [isGenerating, setIsGenerating] = useState(false);
   const [showRightSidebar, setShowRightSidebar] = useState(true);
+  const [pendingAudioSelection, setPendingAudioSelection] = useState<{ target: 'reference' | 'source'; url: string; title?: string } | null>(null);
 
   // Mobile UI Toggle
   const [mobileShowList, setMobileShowList] = useState(false);
@@ -1066,6 +1067,20 @@ export default function App() {
     window.history.pushState({}, '', `/playlist/${playlistId}`);
   };
 
+  const handleUseAsReference = (song: Song) => {
+    if (!song.audioUrl) return;
+    setPendingAudioSelection({ target: 'reference', url: song.audioUrl, title: song.title });
+    setCurrentView('create');
+    setMobileShowList(false);
+  };
+
+  const handleCoverSong = (song: Song) => {
+    if (!song.audioUrl) return;
+    setPendingAudioSelection({ target: 'source', url: song.audioUrl, title: song.title });
+    setCurrentView('create');
+    setMobileShowList(false);
+  };
+
   const handleBackFromPlaylist = () => {
     setViewingPlaylistId(null);
     setCurrentView('library');
@@ -1184,6 +1199,9 @@ export default function App() {
                 onGenerate={handleGenerate}
                 isGenerating={isGenerating}
                 initialData={reuseData}
+                createdSongs={songs}
+                pendingAudioSelection={pendingAudioSelection}
+                onAudioSelectionApplied={() => setPendingAudioSelection(null)}
               />
             </div>
 
@@ -1198,6 +1216,7 @@ export default function App() {
                 selectedSong={selectedSong}
                 likedSongIds={likedSongIds}
                 isPlaying={isPlaying}
+                referenceTracks={referenceTracks}
                 onPlay={playSong}
                 onSelect={(s) => {
                   setSelectedSong(s);
@@ -1211,6 +1230,8 @@ export default function App() {
                 onReusePrompt={handleReuse}
                 onDelete={handleDeleteSong}
                 onDeleteMany={handleDeleteSongs}
+                onUseAsReference={handleUseAsReference}
+                onCoverSong={handleCoverSong}
               />
             </div>
 

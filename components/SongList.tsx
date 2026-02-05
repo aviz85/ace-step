@@ -12,6 +12,7 @@ interface SongListProps {
     selectedSong: Song | null;
     likedSongIds: Set<string>;
     isPlaying: boolean;
+    referenceTracks?: { id: string; filename: string; audio_url: string; duration?: number | null; created_at?: string }[];
     onPlay: (song: Song) => void;
     onSelect: (song: Song) => void;
     onToggleLike: (songId: string) => void;
@@ -22,6 +23,8 @@ interface SongListProps {
     onReusePrompt?: (song: Song) => void;
     onDelete?: (song: Song) => void;
     onDeleteMany?: (songs: Song[]) => void;
+    onUseAsReference?: (song: Song) => void;
+    onCoverSong?: (song: Song) => void;
 }
 
 // ... existing code ...
@@ -44,6 +47,7 @@ export const SongList: React.FC<SongListProps> = ({
     selectedSong,
     likedSongIds,
     isPlaying,
+    referenceTracks = [],
     onPlay,
     onSelect,
     onToggleLike,
@@ -53,7 +57,9 @@ export const SongList: React.FC<SongListProps> = ({
     onNavigateToProfile,
     onReusePrompt,
     onDelete,
-    onDeleteMany
+    onDeleteMany,
+    onUseAsReference,
+    onCoverSong
 }) => {
     const { user } = useAuth();
     const [searchQuery, setSearchQuery] = useState('');
@@ -119,6 +125,31 @@ export const SongList: React.FC<SongListProps> = ({
             return true;
         });
     }, [songs, searchQuery, activeFilters, likedSongIds]);
+
+    const filteredUploads = useMemo(() => {
+        if (activeFilters.size > 0) return [];
+        if (!referenceTracks.length) return [];
+        return referenceTracks.filter(track => {
+            const title = track.filename.replace(/\.[^/.]+$/, '');
+            return title.toLowerCase().includes(searchQuery.toLowerCase());
+        });
+    }, [referenceTracks, searchQuery, activeFilters]);
+
+    const listItems = useMemo(() => {
+        const songItems = filteredSongs.map(song => ({
+            type: 'song' as const,
+            id: song.id,
+            createdAt: song.createdAt,
+            song
+        }));
+        const uploadItems = filteredUploads.map(track => ({
+            type: 'upload' as const,
+            id: track.id,
+            createdAt: new Date(track.created_at || Date.now()),
+            track
+        }));
+        return [...songItems, ...uploadItems].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    }, [filteredSongs, filteredUploads]);
 
     const selectableSongs = useMemo(
         () => filteredSongs.filter(song => !song.isGenerating),
@@ -254,7 +285,7 @@ export const SongList: React.FC<SongListProps> = ({
 
                 {/* List */}
                 <div className="space-y-2"> {/* Reduced vertical spacing */}
-                    {filteredSongs.length === 0 ? (
+                    {listItems.length === 0 ? (
                         <div className="flex flex-col items-center justify-center h-64 text-zinc-500 space-y-4 border border-dashed border-zinc-200 dark:border-white/5 rounded-2xl bg-zinc-50 dark:bg-white/[0.02]">
                             <div className="w-16 h-16 rounded-full bg-zinc-100 dark:bg-white/5 flex items-center justify-center">
                                 <Filter size={32} />
@@ -268,36 +299,59 @@ export const SongList: React.FC<SongListProps> = ({
                             </button>
                         </div>
                     ) : (
-                        filteredSongs.map((song) => (
-                            <SongItem
-                                key={song.id}
-                                song={song}
-                                isCurrent={currentSong?.id === song.id}
-                                isSelected={selectedSong?.id === song.id}
-                                isSelectionMode={isSelecting}
-                                isChecked={selectedIds.has(song.id)}
-                                isLiked={likedSongIds.has(song.id)}
-                                isPlaying={isPlaying}
-                                isOwner={user?.id === song.userId}
-                                onPlay={() => onPlay(song)}
-                                onSelect={() => onSelect(song)}
-                                onToggleSelect={() => {
-                                    if (song.isGenerating) return;
-                                    setSelectedIds(prev => {
-                                        const next = new Set(prev);
-                                        if (next.has(song.id)) next.delete(song.id);
-                                        else next.add(song.id);
-                                        return next;
-                                    });
-                                }}
-                                onToggleLike={() => onToggleLike(song.id)}
-                                onAddToPlaylist={() => onAddToPlaylist(song)}
-                                onOpenVideo={() => onOpenVideo && onOpenVideo(song)}
-                                onShowDetails={() => onShowDetails && onShowDetails(song)}
-                                onNavigateToProfile={onNavigateToProfile}
-                                onReusePrompt={() => onReusePrompt?.(song)}
-                                onDelete={() => onDelete?.(song)}
-                            />
+                        listItems.map((item) => (
+                            item.type === 'song' ? (
+                                <SongItem
+                                    key={item.id}
+                                    song={item.song}
+                                    isCurrent={currentSong?.id === item.song.id}
+                                    isSelected={selectedSong?.id === item.song.id}
+                                    isSelectionMode={isSelecting}
+                                    isChecked={selectedIds.has(item.song.id)}
+                                    isLiked={likedSongIds.has(item.song.id)}
+                                    isPlaying={isPlaying}
+                                    isOwner={user?.id === item.song.userId}
+                                    onPlay={() => onPlay(item.song)}
+                                    onSelect={() => onSelect(item.song)}
+                                    onToggleSelect={() => {
+                                        if (item.song.isGenerating) return;
+                                        setSelectedIds(prev => {
+                                            const next = new Set(prev);
+                                            if (next.has(item.song.id)) next.delete(item.song.id);
+                                            else next.add(item.song.id);
+                                            return next;
+                                        });
+                                    }}
+                                    onToggleLike={() => onToggleLike(item.song.id)}
+                                    onAddToPlaylist={() => onAddToPlaylist(item.song)}
+                                    onOpenVideo={() => onOpenVideo && onOpenVideo(item.song)}
+                                    onShowDetails={() => onShowDetails && onShowDetails(item.song)}
+                                    onNavigateToProfile={onNavigateToProfile}
+                                    onReusePrompt={() => onReusePrompt?.(item.song)}
+                                    onDelete={() => onDelete?.(item.song)}
+                                    onUseAsReference={() => onUseAsReference?.(item.song)}
+                                    onCoverSong={() => onCoverSong?.(item.song)}
+                                />
+                            ) : (
+                                <UploadItem
+                                    key={`upload_${item.id}`}
+                                    track={item.track}
+                                    onPlay={(audioUrl, title) => {
+                                        onPlay({
+                                            id: `upload_${item.id}`,
+                                            title,
+                                            lyrics: '',
+                                            style: 'Upload',
+                                            coverUrl: '',
+                                            duration: '0:00',
+                                            createdAt: item.createdAt,
+                                            tags: [],
+                                            audioUrl,
+                                            isPublic: false,
+                                        } as Song);
+                                    }}
+                                />
+                            )
                         ))
                     )}
                 </div>
@@ -325,6 +379,8 @@ interface SongItemProps {
     onNavigateToProfile?: (username: string) => void;
     onReusePrompt?: () => void;
     onDelete?: () => void;
+    onUseAsReference?: () => void;
+    onCoverSong?: () => void;
 }
 
 const SongItem: React.FC<SongItemProps> = ({
@@ -345,7 +401,9 @@ const SongItem: React.FC<SongItemProps> = ({
     onShowDetails,
     onNavigateToProfile,
     onReusePrompt,
-    onDelete
+    onDelete,
+    onUseAsReference,
+    onCoverSong
 }) => {
     const [showDropdown, setShowDropdown] = useState(false);
     const [shareModalOpen, setShareModalOpen] = useState(false);
@@ -355,7 +413,17 @@ const SongItem: React.FC<SongItemProps> = ({
         <>
         <div
             onClick={onSelect}
-            className={`group flex items-center gap-4 p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-[#18181b] transition-all cursor-pointer border ${isSelected ? 'bg-zinc-100 dark:bg-[#18181b] border-zinc-200 dark:border-white/10' : 'border-transparent bg-transparent'}`}
+            draggable={Boolean(song.audioUrl) && !song.isGenerating}
+            onDragStart={(e) => {
+                if (!song.audioUrl || song.isGenerating) return;
+                e.dataTransfer.effectAllowed = 'copy';
+                e.dataTransfer.setData('application/x-ace-audio', JSON.stringify({
+                    url: song.audioUrl,
+                    title: song.title || 'Untitled',
+                    source: 'song',
+                }));
+            }}
+            className={`group flex items-center gap-4 p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-[#18181b] transition-all cursor-pointer border ${isSelected ? 'bg-zinc-100 dark:bg-[#18181b] border-zinc-200 dark:border-white/10' : 'border-transparent bg-transparent'} ${song.audioUrl && !song.isGenerating ? 'cursor-grab active:cursor-grabbing' : ''}`}
         >
             {isSelectionMode && (
                 <button
@@ -553,6 +621,8 @@ const SongItem: React.FC<SongItemProps> = ({
                                 onAddToPlaylist={() => onAddToPlaylist?.(song)}
                                 onDelete={() => onDelete?.(song)}
                                 onShare={() => setShareModalOpen(true)}
+                                onUseAsReference={() => onUseAsReference?.()}
+                                onCoverSong={() => onCoverSong?.()}
                             />
                         </div>
                     </div>
@@ -575,5 +645,56 @@ const SongItem: React.FC<SongItemProps> = ({
             song={song}
         />
         </>
+    );
+};
+
+const UploadItem: React.FC<{
+    track: { id: string; filename: string; audio_url: string; duration?: number | null };
+    onPlay: (audioUrl: string, title: string) => void;
+}> = ({ track, onPlay }) => {
+    const title = track.filename.replace(/\.[^/.]+$/, '');
+    const duration = track.duration
+        ? `${Math.floor(track.duration / 60)}:${String(Math.floor(track.duration % 60)).padStart(2, '0')}`
+        : '--:--';
+
+    return (
+        <div
+            className="group flex items-center gap-4 p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-[#18181b] transition-all cursor-grab active:cursor-grabbing border border-transparent"
+            draggable
+            onDragStart={(e) => {
+                e.dataTransfer.effectAllowed = 'copy';
+                e.dataTransfer.setData('application/x-ace-audio', JSON.stringify({
+                    url: track.audio_url,
+                    title,
+                    source: 'upload',
+                }));
+            }}
+        >
+            <div className="relative w-16 h-16 flex-shrink-0 rounded-md bg-zinc-200 dark:bg-zinc-800 overflow-hidden shadow-sm">
+                <AlbumCover seed={track.id || title} size="full" className="w-full h-full opacity-40" />
+                <div
+                    className="absolute inset-0 bg-black/40 flex items-center justify-center cursor-pointer transition-opacity"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        onPlay(track.audio_url, title);
+                    }}
+                >
+                    <div className="w-9 h-9 rounded-full bg-white flex items-center justify-center shadow-lg">
+                        <Play fill="black" className="text-black ml-0.5 w-4 h-4" />
+                    </div>
+                </div>
+            </div>
+
+            <div className="flex-1 min-w-0">
+                <div className="text-sm font-bold text-zinc-900 dark:text-white truncate">
+                    {title}
+                </div>
+                <div className="text-[11px] text-zinc-400 mt-1">Upload</div>
+            </div>
+
+            <div className="text-xs font-mono text-zinc-500 dark:text-zinc-600 self-start pt-1">
+                {duration}
+            </div>
+        </div>
     );
 };

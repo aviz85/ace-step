@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Sparkles, ChevronDown, Settings2, Trash2, Music2, Sliders, Dices, Hash, RefreshCw, Plus, Upload, Play, Pause, Loader2 } from 'lucide-react';
 import { GenerationParams, Song } from '../types';
 import { useAuth } from '../context/AuthContext';
@@ -19,6 +19,9 @@ interface CreatePanelProps {
   onGenerate: (params: GenerationParams) => void;
   isGenerating: boolean;
   initialData?: { song: Song, timestamp: number } | null;
+  createdSongs?: Song[];
+  pendingAudioSelection?: { target: 'reference' | 'source'; url: string; title?: string } | null;
+  onAudioSelectionApplied?: () => void;
 }
 
 const KEY_SIGNATURES = [
@@ -98,8 +101,15 @@ const VOCAL_LANGUAGES = [
   { value: 'zh', label: 'Chinese (Mandarin)' },
 ];
 
-export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerating, initialData }) => {
-  const { isAuthenticated, token } = useAuth();
+export const CreatePanel: React.FC<CreatePanelProps> = ({
+  onGenerate,
+  isGenerating,
+  initialData,
+  createdSongs = [],
+  pendingAudioSelection,
+  onAudioSelectionApplied,
+}) => {
+  const { isAuthenticated, token, user } = useAuth();
 
   // Mode
   const [customMode, setCustomMode] = useState(true);
@@ -177,10 +187,13 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
 
   const [isUploadingReference, setIsUploadingReference] = useState(false);
   const [isUploadingSource, setIsUploadingSource] = useState(false);
+  const [isTranscribingReference, setIsTranscribingReference] = useState(false);
+  const transcribeAbortRef = useRef<AbortController | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isFormattingStyle, setIsFormattingStyle] = useState(false);
   const [isFormattingLyrics, setIsFormattingLyrics] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [dragKind, setDragKind] = useState<'file' | 'audio' | null>(null);
   const referenceInputRef = useRef<HTMLInputElement>(null);
   const sourceInputRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
@@ -201,9 +214,24 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
   const [referenceTracks, setReferenceTracks] = useState<ReferenceTrack[]>([]);
   const [isLoadingTracks, setIsLoadingTracks] = useState(false);
   const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
+  const [playingTrackSource, setPlayingTrackSource] = useState<'uploads' | 'created' | null>(null);
   const modalAudioRef = useRef<HTMLAudioElement>(null);
   const [modalTrackTime, setModalTrackTime] = useState(0);
   const [modalTrackDuration, setModalTrackDuration] = useState(0);
+  const [libraryTab, setLibraryTab] = useState<'uploads' | 'created'>('uploads');
+
+  const createdTrackOptions = useMemo(() => {
+    return createdSongs
+      .filter(song => !song.isGenerating)
+      .filter(song => (user ? song.userId === user.id : true))
+      .filter(song => Boolean(song.audioUrl))
+      .map(song => ({
+        id: song.id,
+        title: song.title || 'Untitled',
+        audio_url: song.audioUrl!,
+        duration: song.duration,
+      }));
+  }, [createdSongs, user]);
 
   const getAudioLabel = (url: string) => {
     try {
@@ -235,6 +263,16 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
       setInstrumental(initialData.song.lyrics.length === 0);
     }
   }, [initialData]);
+
+  useEffect(() => {
+    if (!pendingAudioSelection) return;
+    applyAudioTargetUrl(
+      pendingAudioSelection.target,
+      pendingAudioSelection.url,
+      pendingAudioSelection.title
+    );
+    onAudioSelectionApplied?.();
+  }, [pendingAudioSelection, onAudioSelectionApplied]);
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -312,34 +350,47 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
   }, [duration, activeMaxDuration]);
 
   useEffect(() => {
-    const isFileDrag = (e: DragEvent) =>
-      !!(e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files'));
+    const getDragKind = (e: DragEvent): 'file' | 'audio' | null => {
+      if (!e.dataTransfer) return null;
+      const types = Array.from(e.dataTransfer.types);
+      if (types.includes('Files')) return 'file';
+      if (types.includes('application/x-ace-audio')) return 'audio';
+      return null;
+    };
 
     const handleDragEnter = (e: DragEvent) => {
-      if (!isFileDrag(e)) return;
+      const kind = getDragKind(e);
+      if (!kind) return;
       dragDepthRef.current += 1;
       setIsDraggingFile(true);
+      setDragKind(kind);
       e.preventDefault();
     };
 
     const handleDragOver = (e: DragEvent) => {
-      if (!isFileDrag(e)) return;
+      const kind = getDragKind(e);
+      if (!kind) return;
+      setDragKind(kind);
       e.preventDefault();
     };
 
     const handleDragLeave = (e: DragEvent) => {
-      if (!isFileDrag(e)) return;
+      const kind = getDragKind(e);
+      if (!kind) return;
       dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
       if (dragDepthRef.current === 0) {
         setIsDraggingFile(false);
+        setDragKind(null);
       }
     };
 
     const handleDrop = (e: DragEvent) => {
-      if (!isFileDrag(e)) return;
+      const kind = getDragKind(e);
+      if (!kind) return;
       e.preventDefault();
       dragDepthRef.current = 0;
       setIsDraggingFile(false);
+      setDragKind(null);
     };
 
     window.addEventListener('dragenter', handleDragEnter);
@@ -437,9 +488,10 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
     }
   };
 
-  const openAudioModal = (target: 'reference' | 'source') => {
+  const openAudioModal = (target: 'reference' | 'source', tab: 'uploads' | 'created' = 'uploads') => {
     setAudioModalTarget(target);
     setTempAudioUrl('');
+    setLibraryTab(tab);
     setShowAudioModal(true);
     void fetchReferenceTracks();
   };
@@ -490,13 +542,54 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
       // Also set as current reference/source
       const selectedTarget = target ?? audioModalTarget;
       applyAudioTargetUrl(selectedTarget, data.track.audio_url, data.track.filename);
-      setShowAudioModal(false);
+      if (data.whisper_available && data.track?.id) {
+        void transcribeReferenceTrack(data.track.id).then(() => undefined);
+      } else {
+        setShowAudioModal(false);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Upload failed';
       setUploadError(message);
     } finally {
       setIsUploadingReference(false);
     }
+  };
+
+  const transcribeReferenceTrack = async (trackId: string) => {
+    if (!token) return;
+    setIsTranscribingReference(true);
+    const controller = new AbortController();
+    transcribeAbortRef.current = controller;
+    try {
+      const response = await fetch(`/api/reference-tracks/${trackId}/transcribe`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error('Failed to transcribe');
+      }
+      const data = await response.json();
+      if (data.lyrics) {
+        setLyrics(prev => prev || data.lyrics);
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      console.error('Transcription failed:', err);
+    } finally {
+      if (transcribeAbortRef.current === controller) {
+        transcribeAbortRef.current = null;
+      }
+      setIsTranscribingReference(false);
+    }
+  };
+
+  const cancelTranscription = () => {
+    if (transcribeAbortRef.current) {
+      transcribeAbortRef.current.abort();
+      transcribeAbortRef.current = null;
+    }
+    setIsTranscribingReference(false);
   };
 
   const deleteReferenceTrack = async (trackId: string) => {
@@ -508,8 +601,9 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
       });
       if (response.ok) {
         setReferenceTracks(prev => prev.filter(t => t.id !== trackId));
-        if (playingTrackId === trackId) {
+        if (playingTrackId === trackId && playingTrackSource === 'uploads') {
           setPlayingTrackId(null);
+          setPlayingTrackSource(null);
           if (modalAudioRef.current) {
             modalAudioRef.current.pause();
           }
@@ -520,20 +614,23 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
     }
   };
 
-  const useReferenceTrack = (track: ReferenceTrack) => {
-    applyAudioTargetUrl(audioModalTarget, track.audio_url, track.filename);
+  const useReferenceTrack = (track: { audio_url: string; title?: string }) => {
+    applyAudioTargetUrl(audioModalTarget, track.audio_url, track.title);
     setShowAudioModal(false);
     setPlayingTrackId(null);
+    setPlayingTrackSource(null);
   };
 
-  const toggleModalTrack = (track: ReferenceTrack) => {
+  const toggleModalTrack = (track: { id: string; audio_url: string; source: 'uploads' | 'created' }) => {
     if (playingTrackId === track.id) {
       if (modalAudioRef.current) {
         modalAudioRef.current.pause();
       }
       setPlayingTrackId(null);
+      setPlayingTrackSource(null);
     } else {
       setPlayingTrackId(track.id);
+      setPlayingTrackSource(track.source);
       if (modalAudioRef.current) {
         modalAudioRef.current.src = track.audio_url;
         modalAudioRef.current.play().catch(() => undefined);
@@ -588,6 +685,18 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
     const file = e.dataTransfer.files?.[0];
     if (file) {
       void uploadReferenceTrack(file, target);
+      return;
+    }
+    const payload = e.dataTransfer.getData('application/x-ace-audio');
+    if (payload) {
+      try {
+        const data = JSON.parse(payload);
+        if (data?.url) {
+          applyAudioTargetUrl(target, data.url, data.title);
+        }
+      } catch {
+        // ignore
+      }
     }
   };
 
@@ -602,7 +711,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
   };
 
   const handleWorkspaceDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    if (e.dataTransfer.types.includes('Files')) {
+    if (e.dataTransfer.types.includes('Files') || e.dataTransfer.types.includes('application/x-ace-audio')) {
       e.preventDefault();
     }
   };
@@ -706,12 +815,16 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
           <div className="absolute inset-0 bg-white/70 dark:bg-black/50 backdrop-blur-sm" />
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="flex flex-col items-center gap-2 rounded-2xl border border-zinc-200 dark:border-white/10 bg-white/90 dark:bg-zinc-900/90 px-6 py-5 shadow-xl">
-              <div className="w-12 h-12 rounded-full bg-gradient-to-br from-pink-500 to-purple-600 text-white flex items-center justify-center shadow-lg">
-                <Upload size={22} />
+              <div className={`w-12 h-12 rounded-full ${dragKind === 'audio' ? 'bg-green-500/90' : 'bg-gradient-to-br from-pink-500 to-purple-600'} text-white flex items-center justify-center shadow-lg`}>
+                {dragKind === 'audio' ? <Plus size={22} /> : <Upload size={22} />}
               </div>
-              <div className="text-sm font-semibold text-zinc-900 dark:text-white">Drop to upload</div>
+              <div className="text-sm font-semibold text-zinc-900 dark:text-white">
+                {dragKind === 'audio' ? 'Drop to use audio' : 'Drop to upload'}
+              </div>
               <div className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                Uploading as {audioTab === 'reference' ? 'Reference' : 'Cover'}
+                {dragKind === 'audio'
+                  ? `Using as ${audioTab === 'reference' ? 'Reference' : 'Cover'}`
+                  : `Uploading as ${audioTab === 'reference' ? 'Reference' : 'Cover'}`}
               </div>
             </div>
           </div>
@@ -1072,13 +1185,13 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                 <div className="flex gap-2">
                   <button
                     type="button"
-                    onClick={() => openAudioModal(audioTab)}
+                    onClick={() => openAudioModal(audioTab, 'uploads')}
                     className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[11px] font-medium bg-zinc-100 dark:bg-white/5 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
                   >
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/>
                     </svg>
-                    {audioTab === 'reference' ? 'From library' : 'From library'}
+                    Library
                   </button>
                   <button
                     type="button"
@@ -1854,7 +1967,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
         <div className="fixed inset-0 z-[120] flex items-center justify-center">
           <div
             className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-            onClick={() => { setShowAudioModal(false); setPlayingTrackId(null); }}
+            onClick={() => { setShowAudioModal(false); setPlayingTrackId(null); setPlayingTrackSource(null); }}
           />
           <div className="relative w-[92%] max-w-lg rounded-2xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-white/10 shadow-2xl overflow-hidden">
             {/* Header */}
@@ -1871,7 +1984,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                   </p>
                 </div>
                 <button
-                  onClick={() => { setShowAudioModal(false); setPlayingTrackId(null); }}
+                  onClick={() => { setShowAudioModal(false); setPlayingTrackId(null); setPlayingTrackSource(null); }}
                   className="p-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-white/10 text-zinc-400 hover:text-zinc-900 dark:hover:text-white transition-colors"
                 >
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1893,13 +2006,18 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                   };
                   input.click();
                 }}
-                disabled={isUploadingReference}
+                disabled={isUploadingReference || isTranscribingReference}
                 className="mt-4 w-full flex items-center justify-center gap-2 rounded-xl border border-dashed border-zinc-300 dark:border-white/20 bg-zinc-50 dark:bg-white/5 px-4 py-3 text-sm font-medium text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-white/10 hover:border-zinc-400 dark:hover:border-white/30 transition-all"
               >
                 {isUploadingReference ? (
                   <>
                     <RefreshCw size={16} className="animate-spin" />
                     Uploading...
+                  </>
+                ) : isTranscribingReference ? (
+                  <>
+                    <RefreshCw size={16} className="animate-spin" />
+                    Transcribing...
                   </>
                 ) : (
                   <>
@@ -1913,67 +2031,184 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
               {uploadError && (
                 <div className="mt-2 text-xs text-rose-500">{uploadError}</div>
               )}
+              {isTranscribingReference && (
+                <div className="mt-2 flex items-center justify-between text-xs text-zinc-400">
+                  <span>Transcribing with Whisper…</span>
+                  <button
+                    type="button"
+                    onClick={cancelTranscription}
+                    className="text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
             </div>
 
-            {/* Mine Section */}
+            {/* Library Section */}
             <div className="border-t border-zinc-100 dark:border-white/5">
               <div className="px-5 py-3 flex items-center gap-2">
-                <span className="px-3 py-1 rounded-full bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-xs font-semibold">
-                  Mine
-                </span>
+                <div className="flex items-center gap-1 bg-zinc-200/60 dark:bg-white/10 rounded-full p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setLibraryTab('uploads')}
+                    className={`px-3 py-1 rounded-full text-xs font-semibold transition-colors ${
+                      libraryTab === 'uploads'
+                        ? 'bg-zinc-900 dark:bg-white text-white dark:text-zinc-900'
+                        : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200'
+                    }`}
+                  >
+                    Uploaded
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLibraryTab('created')}
+                    className={`px-3 py-1 rounded-full text-xs font-semibold transition-colors ${
+                      libraryTab === 'created'
+                        ? 'bg-zinc-900 dark:bg-white text-white dark:text-zinc-900'
+                        : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200'
+                    }`}
+                  >
+                    Created
+                  </button>
+                </div>
               </div>
 
               {/* Track List */}
               <div className="max-h-[280px] overflow-y-auto">
-                {isLoadingTracks ? (
-                  <div className="px-5 py-8 text-center">
-                    <RefreshCw size={20} className="animate-spin mx-auto text-zinc-400" />
-                    <p className="text-xs text-zinc-400 mt-2">Loading tracks...</p>
-                  </div>
-                ) : referenceTracks.length === 0 ? (
+                {libraryTab === 'uploads' ? (
+                  isLoadingTracks ? (
+                    <div className="px-5 py-8 text-center">
+                      <RefreshCw size={20} className="animate-spin mx-auto text-zinc-400" />
+                      <p className="text-xs text-zinc-400 mt-2">Loading tracks...</p>
+                    </div>
+                  ) : referenceTracks.length === 0 ? (
+                    <div className="px-5 py-8 text-center">
+                      <Music2 size={24} className="mx-auto text-zinc-300 dark:text-zinc-600" />
+                      <p className="text-sm text-zinc-400 mt-2">No uploads yet</p>
+                      <p className="text-xs text-zinc-400 mt-1">Upload audio files to use them as references</p>
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-zinc-100 dark:divide-white/5">
+                      {referenceTracks.map((track) => (
+                        <div
+                          key={track.id}
+                          className="px-5 py-3 flex items-center gap-3 hover:bg-zinc-50 dark:hover:bg-white/[0.02] transition-colors group"
+                        >
+                          {/* Play Button */}
+                          <button
+                            type="button"
+                            onClick={() => toggleModalTrack({ id: track.id, audio_url: track.audio_url, source: 'uploads' })}
+                            className="flex-shrink-0 w-9 h-9 rounded-full bg-zinc-100 dark:bg-white/10 text-zinc-600 dark:text-zinc-300 flex items-center justify-center hover:bg-zinc-200 dark:hover:bg-white/20 transition-colors"
+                          >
+                            {playingTrackId === track.id && playingTrackSource === 'uploads' ? (
+                              <Pause size={14} fill="currentColor" />
+                            ) : (
+                              <Play size={14} fill="currentColor" className="ml-0.5" />
+                            )}
+                          </button>
+
+                          {/* Track Info */}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">
+                                {track.filename.replace(/\.[^/.]+$/, '')}
+                              </span>
+                              {track.tags && track.tags.length > 0 && (
+                                <div className="flex gap-1">
+                                  {track.tags.slice(0, 2).map((tag, i) => (
+                                    <span key={i} className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-zinc-200 dark:bg-white/10 text-zinc-600 dark:text-zinc-400">
+                                      {tag}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                            {/* Progress bar with seek - show when this track is playing */}
+                            {playingTrackId === track.id && playingTrackSource === 'uploads' ? (
+                              <div className="flex items-center gap-2 mt-1.5">
+                                <span className="text-[10px] text-zinc-400 tabular-nums w-8">
+                                  {formatTime(modalTrackTime)}
+                                </span>
+                                <div
+                                  className="flex-1 h-1.5 rounded-full bg-zinc-200 dark:bg-white/10 cursor-pointer group/seek"
+                                  onClick={(e) => {
+                                    if (modalAudioRef.current && modalTrackDuration > 0) {
+                                      const rect = e.currentTarget.getBoundingClientRect();
+                                      const percent = (e.clientX - rect.left) / rect.width;
+                                      modalAudioRef.current.currentTime = percent * modalTrackDuration;
+                                    }
+                                  }}
+                                >
+                                  <div
+                                    className="h-full bg-gradient-to-r from-pink-500 to-purple-500 rounded-full relative"
+                                    style={{ width: modalTrackDuration > 0 ? `${(modalTrackTime / modalTrackDuration) * 100}%` : '0%' }}
+                                  >
+                                    <div className="absolute right-0 top-1/2 -translate-y-1/2 w-2.5 h-2.5 rounded-full bg-white shadow-md opacity-0 group-hover/seek:opacity-100 transition-opacity" />
+                                  </div>
+                                </div>
+                                <span className="text-[10px] text-zinc-400 tabular-nums w-8 text-right">
+                                  {formatTime(modalTrackDuration)}
+                                </span>
+                              </div>
+                            ) : (
+                              <div className="text-xs text-zinc-400 mt-0.5">
+                                {track.duration ? formatTime(track.duration) : '--:--'}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Actions */}
+                          <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                              type="button"
+                              onClick={() => useReferenceTrack({ audio_url: track.audio_url, title: track.filename })}
+                              className="px-3 py-1.5 rounded-lg bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-xs font-semibold hover:bg-zinc-800 dark:hover:bg-zinc-100 transition-colors"
+                            >
+                              Use
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void deleteReferenceTrack(track.id)}
+                              className="p-1.5 rounded-lg hover:bg-zinc-200 dark:hover:bg-white/10 text-zinc-400 hover:text-rose-500 transition-colors"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                ) : createdTrackOptions.length === 0 ? (
                   <div className="px-5 py-8 text-center">
                     <Music2 size={24} className="mx-auto text-zinc-300 dark:text-zinc-600" />
-                    <p className="text-sm text-zinc-400 mt-2">No tracks yet</p>
-                    <p className="text-xs text-zinc-400 mt-1">Upload audio files to use them as references</p>
+                    <p className="text-sm text-zinc-400 mt-2">No created songs yet</p>
+                    <p className="text-xs text-zinc-400 mt-1">Generate songs to reuse them as cover or reference</p>
                   </div>
                 ) : (
                   <div className="divide-y divide-zinc-100 dark:divide-white/5">
-                    {referenceTracks.map((track) => (
+                    {createdTrackOptions.map((track) => (
                       <div
                         key={track.id}
                         className="px-5 py-3 flex items-center gap-3 hover:bg-zinc-50 dark:hover:bg-white/[0.02] transition-colors group"
                       >
-                        {/* Play Button */}
                         <button
                           type="button"
-                          onClick={() => toggleModalTrack(track)}
+                          onClick={() => toggleModalTrack({ id: track.id, audio_url: track.audio_url, source: 'created' })}
                           className="flex-shrink-0 w-9 h-9 rounded-full bg-zinc-100 dark:bg-white/10 text-zinc-600 dark:text-zinc-300 flex items-center justify-center hover:bg-zinc-200 dark:hover:bg-white/20 transition-colors"
                         >
-                          {playingTrackId === track.id ? (
+                          {playingTrackId === track.id && playingTrackSource === 'created' ? (
                             <Pause size={14} fill="currentColor" />
                           ) : (
                             <Play size={14} fill="currentColor" className="ml-0.5" />
                           )}
                         </button>
 
-                        {/* Track Info */}
                         <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">
-                              {track.filename.replace(/\.[^/.]+$/, '')}
-                            </span>
-                            {track.tags && track.tags.length > 0 && (
-                              <div className="flex gap-1">
-                                {track.tags.slice(0, 2).map((tag, i) => (
-                                  <span key={i} className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-zinc-200 dark:bg-white/10 text-zinc-600 dark:text-zinc-400">
-                                    {tag}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
+                          <div className="text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">
+                            {track.title}
                           </div>
-                          {/* Progress bar with seek - show when this track is playing */}
-                          {playingTrackId === track.id ? (
+                          {playingTrackId === track.id && playingTrackSource === 'created' ? (
                             <div className="flex items-center gap-2 mt-1.5">
                               <span className="text-[10px] text-zinc-400 tabular-nums w-8">
                                 {formatTime(modalTrackTime)}
@@ -2001,26 +2236,18 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                             </div>
                           ) : (
                             <div className="text-xs text-zinc-400 mt-0.5">
-                              {track.duration ? formatTime(track.duration) : '--:--'}
+                              {track.duration || '--:--'}
                             </div>
                           )}
                         </div>
 
-                        {/* Actions */}
                         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button
                             type="button"
-                            onClick={() => useReferenceTrack(track)}
+                            onClick={() => useReferenceTrack({ audio_url: track.audio_url, title: track.title })}
                             className="px-3 py-1.5 rounded-lg bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-xs font-semibold hover:bg-zinc-800 dark:hover:bg-zinc-100 transition-colors"
                           >
                             Use
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void deleteReferenceTrack(track.id)}
-                            className="p-1.5 rounded-lg hover:bg-zinc-200 dark:hover:bg-white/10 text-zinc-400 hover:text-rose-500 transition-colors"
-                          >
-                            <Trash2 size={14} />
                           </button>
                         </div>
                       </div>
@@ -2043,7 +2270,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                   setModalTrackDuration(modalAudioRef.current.duration);
                   // Update track duration in database if not set
                   const track = referenceTracks.find(t => t.id === playingTrackId);
-                  if (track && !track.duration && token) {
+                  if (playingTrackSource === 'uploads' && track && !track.duration && token) {
                     fetch(`/api/reference-tracks/${track.id}`, {
                       method: 'PATCH',
                       headers: {

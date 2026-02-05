@@ -137,21 +137,21 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
   const [duration, setDuration] = useState(-1);
   const [batchSize, setBatchSize] = useState(2);
   const [bulkCount, setBulkCount] = useState(1); // Number of independent generation jobs to queue
-  const [guidanceScale, setGuidanceScale] = useState(7.0);
+  const [guidanceScale, setGuidanceScale] = useState(9.0);
   const [randomSeed, setRandomSeed] = useState(true);
   const [seed, setSeed] = useState(-1);
   const [thinking, setThinking] = useState(false); // Default false for GPU compatibility
   const [audioFormat, setAudioFormat] = useState<'mp3' | 'flac'>('mp3');
-  const [inferenceSteps, setInferenceSteps] = useState(8);
+  const [inferenceSteps, setInferenceSteps] = useState(12);
   const [inferMethod, setInferMethod] = useState<'ode' | 'sde'>('ode');
   const [shift, setShift] = useState(3.0);
 
   // LM Parameters (under Expert)
   const [showLmParams, setShowLmParams] = useState(false);
-  const [lmTemperature, setLmTemperature] = useState(0.85);
-  const [lmCfgScale, setLmCfgScale] = useState(2.0);
+  const [lmTemperature, setLmTemperature] = useState(0.8);
+  const [lmCfgScale, setLmCfgScale] = useState(2.2);
   const [lmTopK, setLmTopK] = useState(0);
-  const [lmTopP, setLmTopP] = useState(0.9);
+  const [lmTopP, setLmTopP] = useState(0.92);
   const [lmNegativePrompt, setLmNegativePrompt] = useState('NO USER INPUT');
 
   // Expert Parameters (now in Advanced section)

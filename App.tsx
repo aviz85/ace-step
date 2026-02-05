@@ -46,6 +46,7 @@ export default function App() {
   const [songs, setSongs] = useState<Song[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [likedSongIds, setLikedSongIds] = useState<Set<string>>(new Set());
+  const [referenceTracks, setReferenceTracks] = useState<ReferenceTrack[]>([]);
   const [playQueue, setPlayQueue] = useState<Song[]>([]);
   const [queueIndex, setQueueIndex] = useState(-1);
 
@@ -65,6 +66,7 @@ export default function App() {
   // UI State
   const [isGenerating, setIsGenerating] = useState(false);
   const [showRightSidebar, setShowRightSidebar] = useState(true);
+  const [pendingAudioSelection, setPendingAudioSelection] = useState<{ target: 'reference' | 'source'; url: string; title?: string } | null>(null);
 
   // Mobile UI Toggle
   const [mobileShowList, setMobileShowList] = useState(false);
@@ -106,6 +108,17 @@ export default function App() {
     type: 'success',
     isVisible: false,
   });
+
+  interface ReferenceTrack {
+    id: string;
+    filename: string;
+    storage_key: string;
+    duration: number | null;
+    file_size_bytes: number | null;
+    tags: string[] | null;
+    created_at: string;
+    audio_url: string;
+  }
 
   const showToast = (message: string, type: ToastType = 'success') => {
     setToast({ message, type, isVisible: true });
@@ -281,6 +294,14 @@ export default function App() {
           viewCount: s.view_count || 0,
           userId: s.user_id,
           creator: s.creator,
+          generationParams: (() => {
+            try {
+              if (!s.generation_params) return undefined;
+              return typeof s.generation_params === 'string' ? JSON.parse(s.generation_params) : s.generation_params;
+            } catch {
+              return undefined;
+            }
+          })(),
         });
 
         const mySongs = mySongsRes.songs.map(mapSong);
@@ -306,6 +327,31 @@ export default function App() {
 
     loadSongs();
   }, [isAuthenticated, token]);
+
+  const loadReferenceTracks = useCallback(async () => {
+    if (!isAuthenticated || !token) return;
+    try {
+      const response = await fetch('/api/reference-tracks', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      setReferenceTracks(data.tracks || []);
+    } catch (error) {
+      console.error('Failed to load reference tracks:', error);
+    }
+  }, [isAuthenticated, token]);
+
+  // Load reference tracks for Library
+  useEffect(() => {
+    loadReferenceTracks();
+  }, [loadReferenceTracks]);
+
+  useEffect(() => {
+    if (currentView === 'library') {
+      loadReferenceTracks();
+    }
+  }, [currentView, loadReferenceTracks]);
 
   // Player Logic
   const getActiveQueue = (song?: Song) => {
@@ -520,6 +566,14 @@ export default function App() {
         viewCount: s.view_count || 0,
         userId: s.user_id,
         creator: s.creator,
+        generationParams: (() => {
+          try {
+            if (!s.generation_params) return undefined;
+            return typeof s.generation_params === 'string' ? JSON.parse(s.generation_params) : s.generation_params;
+          } catch {
+            return undefined;
+          }
+        })(),
       }));
 
       // Preserve any generating songs that aren't in the loaded list
@@ -534,10 +588,81 @@ export default function App() {
         // Sort by creation date, newest first
         return mergedSongs.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       });
+
+      // If the current selection was a temp/generating song, replace it with newest real song
+      if (selectedSong?.isGenerating || (selectedSong && !loadedSongs.some(s => s.id === selectedSong.id))) {
+        setSelectedSong(loadedSongs[0] ?? null);
+      }
     } catch (error) {
       console.error('Failed to refresh songs:', error);
     }
   }, [token]);
+
+  const beginPollingJob = useCallback((jobId: string, tempId: string) => {
+    if (!token) return;
+    if (activeJobsRef.current.has(jobId)) return;
+
+    const pollInterval = setInterval(async () => {
+      try {
+        const status = await generateApi.getStatus(jobId, token);
+        const normalizedProgress = Number.isFinite(Number(status.progress))
+          ? (Number(status.progress) > 1 ? Number(status.progress) / 100 : Number(status.progress))
+          : undefined;
+
+        setSongs(prev => prev.map(s => {
+          if (s.id === tempId) {
+            return {
+              ...s,
+              queuePosition: status.status === 'queued' ? status.queuePosition : undefined,
+              progress: normalizedProgress ?? s.progress,
+              stage: status.stage ?? s.stage,
+            };
+          }
+          return s;
+        }));
+
+        if (status.status === 'succeeded' && status.result) {
+          cleanupJob(jobId, tempId);
+          await refreshSongsList();
+
+          if (window.innerWidth < 768) {
+            setMobileShowList(true);
+          }
+        } else if (status.status === 'failed') {
+          cleanupJob(jobId, tempId);
+          console.error(`Job ${jobId} failed:`, status.error);
+          showToast(`Generation failed: ${status.error || 'Unknown error'}`, 'error');
+        }
+      } catch (pollError) {
+        console.error(`Polling error for job ${jobId}:`, pollError);
+        cleanupJob(jobId, tempId);
+      }
+    }, 2000);
+
+    activeJobsRef.current.set(jobId, { tempId, pollInterval });
+    setActiveJobCount(activeJobsRef.current.size);
+
+    setTimeout(() => {
+      if (activeJobsRef.current.has(jobId)) {
+        console.warn(`Job ${jobId} timed out`);
+        cleanupJob(jobId, tempId);
+        showToast('Generation timed out', 'error');
+      }
+    }, 600000);
+  }, [token, cleanupJob, refreshSongsList]);
+
+  const buildTempSongFromParams = (params: GenerationParams, tempId: string, createdAt?: string) => ({
+    id: tempId,
+    title: params.title || 'Generating...',
+    lyrics: '',
+    style: params.style || params.songDescription || '',
+    coverUrl: 'https://picsum.photos/200/200?blur=10',
+    duration: '--:--',
+    createdAt: createdAt ? new Date(createdAt) : new Date(),
+    isGenerating: true,
+    tags: params.customMode ? ['custom'] : ['simple'],
+    isPublic: true,
+  });
 
   // Handlers
   const handleGenerate = async (params: GenerationParams) => {
@@ -578,7 +703,7 @@ export default function App() {
         title: params.title,
         instrumental: params.instrumental,
         vocalLanguage: params.vocalLanguage,
-        duration: params.duration,
+        duration: params.duration && params.duration > 0 ? params.duration : undefined,
         bpm: params.bpm,
         keyScale: params.keyScale,
         timeSignature: params.timeSignature,
@@ -599,6 +724,8 @@ export default function App() {
         lmBackend: params.lmBackend,
         referenceAudioUrl: params.referenceAudioUrl,
         sourceAudioUrl: params.sourceAudioUrl,
+        referenceAudioTitle: params.referenceAudioTitle,
+        sourceAudioTitle: params.sourceAudioTitle,
         audioCodes: params.audioCodes,
         repaintingStart: params.repaintingStart,
         repaintingEnd: params.repaintingEnd,
@@ -624,52 +751,7 @@ export default function App() {
         isFormatCaption: params.isFormatCaption,
       }, token);
 
-      // Poll for completion - each job has its own polling interval
-      const pollInterval = setInterval(async () => {
-        try {
-          const status = await generateApi.getStatus(job.jobId, token);
-
-          // Update queue position on the temp song
-          setSongs(prev => prev.map(s => {
-            if (s.id === tempId) {
-              return {
-                ...s,
-                queuePosition: status.status === 'queued' ? status.queuePosition : undefined,
-              };
-            }
-            return s;
-          }));
-
-          if (status.status === 'succeeded' && status.result) {
-            cleanupJob(job.jobId, tempId);
-            await refreshSongsList();
-
-            if (window.innerWidth < 768) {
-              setMobileShowList(true);
-            }
-          } else if (status.status === 'failed') {
-            cleanupJob(job.jobId, tempId);
-            console.error(`Job ${job.jobId} failed:`, status.error);
-            showToast(`Generation failed: ${status.error || 'Unknown error'}`, 'error');
-          }
-        } catch (pollError) {
-          console.error(`Polling error for job ${job.jobId}:`, pollError);
-          cleanupJob(job.jobId, tempId);
-        }
-      }, 2000);
-
-      // Track this job
-      activeJobsRef.current.set(job.jobId, { tempId, pollInterval });
-      setActiveJobCount(activeJobsRef.current.size);
-
-      // Timeout after 10 minutes
-      setTimeout(() => {
-        if (activeJobsRef.current.has(job.jobId)) {
-          console.warn(`Job ${job.jobId} timed out`);
-          cleanupJob(job.jobId, tempId);
-          showToast('Generation timed out', 'error');
-        }
-      }, 600000);
+      beginPollingJob(job.jobId, tempId);
 
     } catch (e) {
       console.error('Generation error:', e);
@@ -682,6 +764,59 @@ export default function App() {
       showToast('Generation failed. Please try again.', 'error');
     }
   };
+
+  // Resume active jobs on refresh so progress keeps updating
+  useEffect(() => {
+    if (!isAuthenticated || !token) return;
+
+    const resumeJobs = async () => {
+      try {
+        const history = await generateApi.getHistory(token);
+        const jobs = Array.isArray(history.jobs) ? history.jobs : [];
+
+        const activeStatuses = new Set(['pending', 'queued', 'running']);
+        const jobsToResume = jobs.filter((job: any) => activeStatuses.has(job.status));
+
+        if (jobsToResume.length === 0) return;
+
+        setSongs(prev => {
+          const existingIds = new Set(prev.map(s => s.id));
+          const next = [...prev];
+
+          for (const job of jobsToResume) {
+            const jobId = job.id || job.jobId;
+            if (!jobId) continue;
+            const tempId = `job_${jobId}`;
+            if (existingIds.has(tempId)) continue;
+
+            const params = (() => {
+              try {
+                if (!job.params) return {};
+                return typeof job.params === 'string' ? JSON.parse(job.params) : job.params;
+              } catch {
+                return {};
+              }
+            })();
+
+            next.unshift(buildTempSongFromParams(params, tempId, job.created_at));
+            existingIds.add(tempId);
+          }
+          return next;
+        });
+
+        for (const job of jobsToResume) {
+          const jobId = job.id || job.jobId;
+          if (!jobId) continue;
+          const tempId = `job_${jobId}`;
+          beginPollingJob(jobId, tempId);
+        }
+      } catch (error) {
+        console.error('Failed to resume jobs:', error);
+      }
+    };
+
+    resumeJobs();
+  }, [isAuthenticated, token, beginPollingJob]);
 
   const togglePlay = () => {
     if (!currentSong) return;
@@ -817,6 +952,80 @@ export default function App() {
     }
   };
 
+  const handleDeleteSongs = async (songsToDelete: Song[]) => {
+    if (!token || songsToDelete.length === 0) return;
+
+    const confirmed = window.confirm(
+      `Delete ${songsToDelete.length} songs? This action cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    const idsToDelete = new Set(songsToDelete.map(song => song.id));
+    const succeeded: string[] = [];
+    const failed: string[] = [];
+
+    for (const song of songsToDelete) {
+      try {
+        await songsApi.deleteSong(song.id, token);
+        succeeded.push(song.id);
+      } catch (error) {
+        console.error('Failed to delete song:', error);
+        failed.push(song.id);
+      }
+    }
+
+    if (succeeded.length > 0) {
+      setSongs(prev => prev.filter(s => !idsToDelete.has(s.id) || failed.includes(s.id)));
+
+      setLikedSongIds(prev => {
+        const next = new Set(prev);
+        succeeded.forEach(id => next.delete(id));
+        return next;
+      });
+
+      if (selectedSong?.id && succeeded.includes(selectedSong.id)) {
+        setSelectedSong(null);
+      }
+
+      if (currentSong?.id && succeeded.includes(currentSong.id)) {
+        setCurrentSong(null);
+        setIsPlaying(false);
+        if (audioRef.current) {
+          audioRef.current.pause();
+          audioRef.current.src = '';
+        }
+      }
+
+      setPlayQueue(prev => prev.filter(s => !idsToDelete.has(s.id) || failed.includes(s.id)));
+    }
+
+    if (failed.length > 0) {
+      showToast(`Deleted ${succeeded.length}/${songsToDelete.length} songs`, 'error');
+    } else {
+      showToast('Songs deleted successfully');
+    }
+  };
+
+  const handleDeleteReferenceTrack = async (trackId: string) => {
+    if (!token) return;
+    const confirmed = window.confirm('Delete this upload? This action cannot be undone.');
+    if (!confirmed) return;
+    try {
+      const response = await fetch(`/api/reference-tracks/${trackId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        throw new Error('Failed to delete upload');
+      }
+      setReferenceTracks(prev => prev.filter(track => track.id !== trackId));
+      showToast('Upload deleted successfully');
+    } catch (error) {
+      console.error('Failed to delete upload:', error);
+      showToast('Failed to delete upload', 'error');
+    }
+  };
+
   const createPlaylist = async (name: string, description: string) => {
     if (!token) return;
     try {
@@ -859,6 +1068,40 @@ export default function App() {
     window.history.pushState({}, '', `/playlist/${playlistId}`);
   };
 
+  const handleUseAsReference = (song: Song) => {
+    if (!song.audioUrl) return;
+    setPendingAudioSelection({ target: 'reference', url: song.audioUrl, title: song.title });
+    setCurrentView('create');
+    setMobileShowList(false);
+  };
+
+  const handleCoverSong = (song: Song) => {
+    if (!song.audioUrl) return;
+    setPendingAudioSelection({ target: 'source', url: song.audioUrl, title: song.title });
+    setCurrentView('create');
+    setMobileShowList(false);
+  };
+
+  const handleUseUploadAsReference = (track: { audio_url: string; filename: string }) => {
+    setPendingAudioSelection({
+      target: 'reference',
+      url: track.audio_url,
+      title: track.filename.replace(/\.[^/.]+$/, ''),
+    });
+    setCurrentView('create');
+    setMobileShowList(false);
+  };
+
+  const handleCoverUpload = (track: { audio_url: string; filename: string }) => {
+    setPendingAudioSelection({
+      target: 'source',
+      url: track.audio_url,
+      title: track.filename.replace(/\.[^/.]+$/, ''),
+    });
+    setCurrentView('create');
+    setMobileShowList(false);
+  };
+
   const handleBackFromPlaylist = () => {
     setViewingPlaylistId(null);
     setCurrentView('library');
@@ -883,19 +1126,28 @@ export default function App() {
   // Render Layout Logic
   const renderContent = () => {
     switch (currentView) {
-      case 'library':
+      case 'library': {
+        const allSongs = user ? songs.filter(s => s.userId === user.id) : [];
         return (
           <LibraryView
+            allSongs={allSongs}
             likedSongs={songs.filter(s => likedSongIds.has(s.id))}
             playlists={playlists}
+            referenceTracks={referenceTracks}
             onPlaySong={playSong}
             onCreatePlaylist={() => {
               setSongToAddToPlaylist(null);
               setIsCreatePlaylistModalOpen(true);
             }}
             onSelectPlaylist={(p) => handleNavigateToPlaylist(p.id)}
+            onAddToPlaylist={openAddToPlaylistModal}
+            onOpenVideo={openVideoGenerator}
+            onReusePrompt={handleReuse}
+            onDeleteSong={handleDeleteSong}
+            onDeleteReferenceTrack={handleDeleteReferenceTrack}
           />
         );
+      }
 
       case 'profile':
         if (!viewingUsername) return null;
@@ -968,6 +1220,9 @@ export default function App() {
                 onGenerate={handleGenerate}
                 isGenerating={isGenerating}
                 initialData={reuseData}
+                createdSongs={songs}
+                pendingAudioSelection={pendingAudioSelection}
+                onAudioSelectionApplied={() => setPendingAudioSelection(null)}
               />
             </div>
 
@@ -982,6 +1237,7 @@ export default function App() {
                 selectedSong={selectedSong}
                 likedSongIds={likedSongIds}
                 isPlaying={isPlaying}
+                referenceTracks={referenceTracks}
                 onPlay={playSong}
                 onSelect={(s) => {
                   setSelectedSong(s);
@@ -994,6 +1250,11 @@ export default function App() {
                 onNavigateToProfile={handleNavigateToProfile}
                 onReusePrompt={handleReuse}
                 onDelete={handleDeleteSong}
+                onDeleteMany={handleDeleteSongs}
+                onUseAsReference={handleUseAsReference}
+                onCoverSong={handleCoverSong}
+                onUseUploadAsReference={handleUseUploadAsReference}
+                onCoverUpload={handleCoverUpload}
               />
             </div>
 

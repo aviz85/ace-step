@@ -125,7 +125,6 @@ async function submitToApi(params: GenerationParams): Promise<{ taskId: string }
   const body: Record<string, unknown> = {
     prompt,
     lyrics,
-    audio_duration: params.duration ?? 60,
     batch_size: params.batchSize ?? 1,
     inference_steps: params.inferenceSteps ?? 8,
     guidance_scale: params.guidanceScale ?? 10.0,
@@ -140,6 +139,7 @@ async function submitToApi(params: GenerationParams): Promise<{ taskId: string }
     lm_backend: params.lmBackend || 'pt',
   };
 
+  if (params.duration && params.duration > 0) body.audio_duration = params.duration;
   if (params.bpm && params.bpm > 0) body.bpm = params.bpm;
   if (params.keyScale) body.key_scale = params.keyScale;
   if (params.timeSignature) body.time_signature = params.timeSignature;
@@ -172,20 +172,42 @@ async function submitToApi(params: GenerationParams): Promise<{ taskId: string }
   if (params.cfgIntervalStart !== undefined && params.cfgIntervalStart > 0) body.cfg_interval_start = params.cfgIntervalStart;
   if (params.cfgIntervalEnd !== undefined && params.cfgIntervalEnd < 1.0) body.cfg_interval_end = params.cfgIntervalEnd;
 
+  const resolveAudioPath = (audioUrl: string): string => {
+    if (audioUrl.startsWith('/audio/')) {
+      return path.join(AUDIO_DIR, audioUrl.replace('/audio/', ''));
+    }
+    if (audioUrl.startsWith('http')) {
+      try {
+        const parsed = new URL(audioUrl);
+        if (parsed.pathname.startsWith('/audio/')) {
+          return path.join(AUDIO_DIR, parsed.pathname.replace('/audio/', ''));
+        }
+      } catch {
+        // fall through
+      }
+    }
+    return audioUrl;
+  };
+
+  // Guard: cover/audio2audio requires a source or audio codes
+  if ((params.taskType === 'cover' || params.taskType === 'audio2audio') && !params.sourceAudioUrl && !params.audioCodes) {
+    throw new Error(`task_type='${params.taskType}' requires a source audio or audio codes`);
+  }
+
   // Handle reference audio - need to pass file path
   if (params.referenceAudioUrl) {
-    let refAudioPath = params.referenceAudioUrl;
-    if (refAudioPath.startsWith('/audio/')) {
-      refAudioPath = path.join(AUDIO_DIR, refAudioPath.replace('/audio/', ''));
-    }
-    body.reference_audio_path = refAudioPath;
+    body.reference_audio_path = resolveAudioPath(params.referenceAudioUrl);
   }
   if (params.sourceAudioUrl) {
-    let srcAudioPath = params.sourceAudioUrl;
-    if (srcAudioPath.startsWith('/audio/')) {
-      srcAudioPath = path.join(AUDIO_DIR, srcAudioPath.replace('/audio/', ''));
-    }
-    body.src_audio_path = srcAudioPath;
+    body.src_audio_path = resolveAudioPath(params.sourceAudioUrl);
+  }
+
+  if (params.taskType === 'cover' || params.taskType === 'audio2audio') {
+    console.log(`[ACE-Step] cover/audio2audio inputs`, {
+      reference_audio_path: body.reference_audio_path,
+      src_audio_path: body.src_audio_path,
+      has_audio_codes: Boolean(params.audioCodes),
+    });
   }
 
   const response = await fetch(`${ACESTEP_API}/release_task`, {
@@ -261,7 +283,26 @@ async function pollApiResult(taskId: string, maxWaitMs = 600000): Promise<ApiTas
 
       return { status: 1, audioPaths, metas };
     } else if (taskData.status === 2) {
-      throw new Error('Generation failed on API side');
+      const details = taskData.error
+        || taskData.message
+        || taskData.status_message
+        || taskData.result
+        || JSON.stringify(taskData);
+      throw new Error(`Generation failed on API side: ${details}`);
+    }
+
+    // Log progress while processing (if provided)
+    if (taskData.result) {
+      try {
+        const resultData = typeof taskData.result === 'string' ? JSON.parse(taskData.result) : taskData.result;
+        const item = Array.isArray(resultData) ? resultData[0] : resultData;
+        if (item && typeof item === 'object' && typeof (item as any).progress === 'number') {
+          const pct = Math.round((item as any).progress * 100);
+          console.log(`[ACE-Step] API task ${taskId} progress: ${pct}%`);
+        }
+      } catch {
+        // ignore parse failures
+      }
     }
 
     // Still processing
@@ -351,6 +392,8 @@ export interface GenerationParams {
   // Expert Parameters
   referenceAudioUrl?: string;
   sourceAudioUrl?: string;
+  referenceAudioTitle?: string;
+  sourceAudioTitle?: string;
   audioCodes?: string;
   repaintingStart?: number;
   repaintingEnd?: number;
@@ -389,6 +432,8 @@ interface JobStatus {
   status: 'queued' | 'running' | 'succeeded' | 'failed';
   queuePosition?: number;
   etaSeconds?: number;
+  progress?: number;
+  stage?: string;
   result?: GenerationResult;
   error?: string;
 }
@@ -403,6 +448,8 @@ interface ActiveJob {
   processPromise?: Promise<void>;
   rawResponse?: unknown;
   queuePosition?: number;
+  progress?: number;
+  stage?: string;
 }
 
 const activeJobs = new Map<string, ActiveJob>();
@@ -466,6 +513,8 @@ async function processQueue(): Promise<void> {
 
 // Submit generation job to queue
 export async function generateMusicViaAPI(params: GenerationParams): Promise<{ jobId: string }> {
+  // Force a fresh API availability check when starting a job
+  resetApiCache();
   const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 
   const job: ActiveJob = {
@@ -509,6 +558,7 @@ async function processGeneration(
     try {
       // Submit to API
       const { taskId } = await submitToApi(params);
+      job.taskId = taskId;
       console.log(`Job ${jobId}: Submitted to API as task ${taskId}`);
 
       // Poll for result
@@ -572,9 +622,10 @@ async function processGeneration(
     const jobOutputDir = path.join(ACESTEP_DIR, 'output', jobId);
     await mkdir(jobOutputDir, { recursive: true });
 
+    const durationToSend = params.duration && params.duration > 0 ? params.duration : 60;
     const args = [
       '--prompt', prompt,
-      '--duration', String(params.duration ?? 60),
+      '--duration', String(durationToSend),
       '--batch-size', String(params.batchSize ?? 1),
       '--infer-steps', String(params.inferenceSteps ?? 8),
       '--guidance-scale', String(params.guidanceScale ?? 10.0),
@@ -706,7 +757,6 @@ function runPythonGeneration(scriptArgs: string[]): Promise<PythonResult> {
       cwd: ACESTEP_DIR,
       env: {
         ...process.env,
-        CUDA_VISIBLE_DEVICES: '0',
         ACESTEP_PATH: ACESTEP_DIR,
       },
     });
@@ -845,9 +895,53 @@ export async function getJobStatus(jobId: string): Promise<JobStatus> {
     };
   }
 
+  if (job.status === 'running' && job.taskId) {
+    try {
+      const response = await fetch(`${ACESTEP_API}/query_result`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_id_list: [job.taskId] }),
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        const taskData = result.data?.[0];
+        if (taskData?.result) {
+          let resultData: unknown = taskData.result;
+          if (typeof resultData === 'string') {
+            try {
+              resultData = JSON.parse(resultData);
+            } catch {
+              resultData = null;
+            }
+          }
+
+          const item = Array.isArray(resultData) ? resultData[0] : resultData;
+          if (item && typeof item === 'object') {
+            const rawProgress = (item as any).progress;
+            const progress = Number.isFinite(Number(rawProgress)) ? Number(rawProgress) : undefined;
+            const stage = typeof (item as any).stage === 'string' ? (item as any).stage : undefined;
+            if (progress !== undefined) job.progress = progress;
+            if (stage) job.stage = stage;
+            return {
+              status: job.status,
+              etaSeconds: Math.max(0, 180 - elapsed),
+              progress: progress ?? job.progress,
+              stage: stage ?? job.stage,
+            };
+          }
+        }
+      }
+    } catch {
+      // ignore progress fetch failures, fall back to ETA only
+    }
+  }
+
   return {
     status: job.status,
     etaSeconds: Math.max(0, 180 - elapsed), // 3 min estimate
+    progress: job.progress,
+    stage: job.stage,
   };
 }
 

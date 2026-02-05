@@ -1,24 +1,129 @@
 import { Router, Response } from 'express';
 import multer from 'multer';
 import path from 'path';
+import os from 'os';
+import { promises as fs } from 'fs';
+import { fileURLToPath } from 'url';
 import { pool } from '../db/pool.js';
 import { authMiddleware, AuthenticatedRequest } from '../middleware/auth.js';
 import { getStorageProvider } from '../services/storage/factory.js';
+import { spawn } from 'child_process';
 
 const router = Router();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const AUDIO_DIR = path.join(__dirname, '../../public/audio');
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max
   fileFilter: (_req, file, cb) => {
-    const allowedTypes = ['audio/mpeg', 'audio/wav', 'audio/flac', 'audio/mp3', 'audio/x-wav', 'audio/x-flac'];
-    if (allowedTypes.includes(file.mimetype) || file.originalname.match(/\.(mp3|wav|flac)$/i)) {
+    const allowedTypes = [
+      'audio/mpeg',
+      'audio/wav',
+      'audio/flac',
+      'audio/mp3',
+      'audio/x-wav',
+      'audio/x-flac',
+      'audio/mp4',
+      'audio/x-m4a',
+      'audio/aac',
+      'video/mp4',
+    ];
+    if (allowedTypes.includes(file.mimetype) || file.originalname.match(/\.(mp3|wav|flac|m4a|mp4)$/i)) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid file type. Only MP3, WAV, and FLAC are allowed.'));
+      cb(new Error('Invalid file type. Only MP3, WAV, FLAC, M4A, and MP4 are allowed.'));
     }
   }
 });
+
+const findWhisperExecutable = async (): Promise<string | null> => {
+  if (process.env.WHISPER_CMD) return process.env.WHISPER_CMD;
+  const customPath = process.env.WHISPER_PATH;
+  if (customPath) {
+    const candidate = path.join(customPath, 'whisper');
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      // ignore
+    }
+  }
+
+  const pathEntries = (process.env.PATH || '').split(path.delimiter);
+  for (const entry of pathEntries) {
+    const candidate = path.join(entry, 'whisper');
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+};
+
+const transcribeWithWhisper = async (buffer: Buffer, originalFilename: string, signal?: AbortSignal): Promise<string | null> => {
+  const whisperCmd = await findWhisperExecutable();
+  if (!whisperCmd) return null;
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'whisper-'));
+  const ext = path.extname(originalFilename) || '.mp3';
+  const inputPath = path.join(tempDir, `input${ext}`);
+  const outputDir = path.join(tempDir, 'out');
+
+  try {
+    await fs.mkdir(outputDir, { recursive: true });
+    await fs.writeFile(inputPath, buffer);
+
+    const args = [
+      inputPath,
+      '--model', 'base',
+      '--output_format', 'txt',
+      '--output_dir', outputDir,
+      '--fp16', 'False'
+    ];
+
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(whisperCmd, args, { stdio: 'ignore' });
+      const handleAbort = () => {
+        proc.kill('SIGTERM');
+        reject(new Error('Transcription cancelled'));
+      };
+      if (signal) {
+        if (signal.aborted) {
+          handleAbort();
+          return;
+        }
+        signal.addEventListener('abort', handleAbort, { once: true });
+      }
+      proc.on('error', reject);
+      proc.on('close', (code) => {
+        if (signal) {
+          signal.removeEventListener('abort', handleAbort);
+        }
+        if (code === 0) resolve();
+        else reject(new Error(`Whisper exited with code ${code}`));
+      });
+    });
+
+    const files = await fs.readdir(outputDir);
+    const txtFile = files.find((file) => file.endsWith('.txt'));
+    if (!txtFile) return null;
+    const text = await fs.readFile(path.join(outputDir, txtFile), 'utf8');
+    return text.trim() || null;
+  } catch (error) {
+    console.warn('Whisper transcription failed:', error);
+    return null;
+  } finally {
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  }
+};
 
 // Get user's reference tracks
 router.get('/', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
@@ -61,6 +166,7 @@ router.post('/', authMiddleware, upload.single('audio'), async (req: Authenticat
     const storage = getStorageProvider();
     await storage.upload(key, req.file.buffer, req.file.mimetype);
     const audioUrl = storage.getPublicUrl(key);
+    const whisperAvailable = Boolean(await findWhisperExecutable());
 
     // Parse tags from request body if provided
     const tags = req.body.tags ? JSON.parse(req.body.tags) : null;
@@ -76,7 +182,8 @@ router.post('/', authMiddleware, upload.single('audio'), async (req: Authenticat
       track: {
         ...result.rows[0],
         audio_url: audioUrl
-      }
+      },
+      whisper_available: whisperAvailable
     });
   } catch (error) {
     console.error('Upload reference track error:', error);
@@ -139,6 +246,44 @@ router.patch('/:id', authMiddleware, async (req: AuthenticatedRequest, res: Resp
   } catch (error) {
     console.error('Update reference track error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Transcribe a reference track with whisper (if available)
+router.post('/:id/transcribe', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const whisperCmd = await findWhisperExecutable();
+    if (!whisperCmd) {
+      res.status(404).json({ error: 'Whisper not available' });
+      return;
+    }
+
+    const result = await pool.query(
+      'SELECT user_id, filename, storage_key FROM reference_tracks WHERE id = $1',
+      [req.params.id]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Track not found' });
+      return;
+    }
+    if (result.rows[0].user_id !== req.user!.id) {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
+
+    const audioPath = path.join(AUDIO_DIR, result.rows[0].storage_key);
+    const buffer = await fs.readFile(audioPath);
+    const controller = new AbortController();
+
+    req.on('close', () => controller.abort());
+
+    const lyrics = await transcribeWithWhisper(buffer, result.rows[0].filename, controller.signal);
+    if (controller.signal.aborted) return;
+
+    res.json({ lyrics: lyrics || '' });
+  } catch (error) {
+    console.error('Transcribe reference track error:', error);
+    res.status(500).json({ error: 'Failed to transcribe' });
   }
 });
 

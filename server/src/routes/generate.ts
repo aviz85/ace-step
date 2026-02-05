@@ -34,13 +34,15 @@ const audioUpload = multer({
       'audio/flac',
       'audio/x-flac',
       'audio/mp4',
+      'audio/x-m4a',
       'audio/aac',
       'audio/ogg',
       'audio/webm',
+      'video/mp4',
     ];
 
     // Also check file extension as fallback
-    const allowedExtensions = ['.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.webm', '.opus'];
+    const allowedExtensions = ['.mp3', '.wav', '.flac', '.m4a', '.mp4', '.aac', '.ogg', '.webm', '.opus'];
     const fileExt = file.originalname.toLowerCase().match(/\.[^.]+$/)?.[0];
 
     if (allowedTypes.includes(file.mimetype) || (fileExt && allowedExtensions.includes(fileExt))) {
@@ -95,6 +97,8 @@ interface GenerateBody {
   // Expert Parameters
   referenceAudioUrl?: string;
   sourceAudioUrl?: string;
+  referenceAudioTitle?: string;
+  sourceAudioTitle?: string;
   audioCodes?: string;
   repaintingStart?: number;
   repaintingEnd?: number;
@@ -142,10 +146,13 @@ router.post('/upload-audio', authMiddleware, audioUpload.single('audio'), async 
         case 'audio/ogg':
           return '.ogg';
         case 'audio/mp4':
+        case 'audio/x-m4a':
         case 'audio/aac':
           return '.m4a';
         case 'audio/webm':
           return '.webm';
+        case 'video/mp4':
+          return '.mp4';
         default:
           return '';
       }
@@ -193,6 +200,8 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
       lmBackend,
       referenceAudioUrl,
       sourceAudioUrl,
+      referenceAudioTitle,
+      sourceAudioTitle,
       audioCodes,
       repaintingStart,
       repaintingEnd,
@@ -257,6 +266,8 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
       lmBackend,
       referenceAudioUrl,
       sourceAudioUrl,
+      referenceAudioTitle,
+      sourceAudioTitle,
       audioCodes,
       repaintingStart,
       repaintingEnd,
@@ -373,7 +384,8 @@ router.get('/status/:jobId', authMiddleware, async (req: AuthenticatedRequest, r
                 const { buffer } = await downloadAudioToBuffer(audioUrl);
                 const ext = audioUrl.includes('.flac') ? '.flac' : '.mp3';
                 const storageKey = `${req.user!.id}/${songId}${ext}`;
-                const storedPath = await storage.upload(storageKey, buffer, `audio/${ext.slice(1)}`);
+                await storage.upload(storageKey, buffer, `audio/${ext.slice(1)}`);
+                const storedPath = storage.getPublicUrl(storageKey);
 
                 await pool.query(
                   `INSERT INTO songs (id, user_id, title, lyrics, style, caption, audio_url,
@@ -436,6 +448,8 @@ router.get('/status/:jobId', authMiddleware, async (req: AuthenticatedRequest, r
           status: aceStatus.status,
           queuePosition: aceStatus.queuePosition,
           etaSeconds: aceStatus.etaSeconds,
+          progress: aceStatus.progress,
+          stage: aceStatus.stage,
           result: aceStatus.result,
           error: aceStatus.error,
         });
@@ -449,6 +463,8 @@ router.get('/status/:jobId', authMiddleware, async (req: AuthenticatedRequest, r
     res.json({
       jobId: req.params.jobId,
       status: job.status,
+      progress: undefined,
+      stage: undefined,
       result: job.result && typeof job.result === 'string' ? JSON.parse(job.result) : job.result,
       error: job.error,
     });
@@ -544,6 +560,60 @@ router.get('/health', async (_req, res: Response) => {
   }
 });
 
+router.get('/limits', async (_req, res: Response) => {
+  try {
+    const { spawn } = await import('child_process');
+    const ACESTEP_DIR = process.env.ACESTEP_PATH || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../ACE-Step-1.5');
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const SCRIPTS_DIR = path.join(__dirname, '../../scripts');
+    const LIMITS_SCRIPT = path.join(SCRIPTS_DIR, 'get_limits.py');
+    const pythonPath = resolvePythonPath(ACESTEP_DIR);
+
+    const result = await new Promise<{ success: boolean; data?: any; error?: string }>((resolve) => {
+      const proc = spawn(pythonPath, [LIMITS_SCRIPT], {
+        cwd: ACESTEP_DIR,
+        env: {
+          ...process.env,
+          ACESTEP_PATH: ACESTEP_DIR,
+        },
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+
+      proc.on('close', (code) => {
+        if (code === 0 && stdout) {
+          try {
+            const parsed = JSON.parse(stdout);
+            resolve({ success: true, data: parsed });
+          } catch {
+            resolve({ success: false, error: 'Failed to parse limits result' });
+          }
+        } else {
+          resolve({ success: false, error: stderr || 'Failed to read limits' });
+        }
+      });
+
+      proc.on('error', (err) => {
+        resolve({ success: false, error: err.message });
+      });
+    });
+
+    if (result.success && result.data) {
+      res.json(result.data);
+    } else {
+      res.status(500).json({ error: result.error || 'Failed to load limits' });
+    }
+  } catch (error) {
+    console.error('Limits error:', error);
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
 router.get('/debug/:taskId', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const rawResponse = getJobRawResponse(req.params.taskId);
@@ -596,7 +666,6 @@ router.post('/format', authMiddleware, async (req: AuthenticatedRequest, res: Re
         cwd: ACESTEP_DIR,
         env: {
           ...process.env,
-          CUDA_VISIBLE_DEVICES: '0',
           ACESTEP_PATH: ACESTEP_DIR,
         },
       });

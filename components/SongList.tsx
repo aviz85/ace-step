@@ -12,6 +12,7 @@ interface SongListProps {
     selectedSong: Song | null;
     likedSongIds: Set<string>;
     isPlaying: boolean;
+    referenceTracks?: { id: string; filename: string; audio_url: string; duration?: number | null; created_at?: string }[];
     onPlay: (song: Song) => void;
     onSelect: (song: Song) => void;
     onToggleLike: (songId: string) => void;
@@ -21,6 +22,11 @@ interface SongListProps {
     onNavigateToProfile?: (username: string) => void;
     onReusePrompt?: (song: Song) => void;
     onDelete?: (song: Song) => void;
+    onDeleteMany?: (songs: Song[]) => void;
+    onUseAsReference?: (song: Song) => void;
+    onCoverSong?: (song: Song) => void;
+    onUseUploadAsReference?: (track: { audio_url: string; filename: string }) => void;
+    onCoverUpload?: (track: { audio_url: string; filename: string }) => void;
 }
 
 // ... existing code ...
@@ -37,12 +43,45 @@ const FILTERS: { id: FilterType; label: string; icon: React.ReactNode }[] = [
     { id: 'generating', label: 'Generating', icon: <Loader2 size={16} /> },
 ];
 
+const createDragPreview = (element: HTMLElement) => {
+    const clone = element.cloneNode(true) as HTMLElement;
+    clone.style.width = `${element.offsetWidth}px`;
+    clone.style.position = 'fixed';
+    clone.style.top = '-1000px';
+    clone.style.left = '-1000px';
+    clone.style.pointerEvents = 'none';
+    clone.style.opacity = '0.95';
+
+    const badge = document.createElement('div');
+    badge.textContent = '+';
+    badge.style.position = 'absolute';
+    badge.style.left = '8px';
+    badge.style.bottom = '8px';
+    badge.style.width = '24px';
+    badge.style.height = '24px';
+    badge.style.display = 'flex';
+    badge.style.alignItems = 'center';
+    badge.style.justifyContent = 'center';
+    badge.style.borderRadius = '9999px';
+    badge.style.background = '#22c55e';
+    badge.style.color = 'white';
+    badge.style.boxShadow = '0 6px 16px rgba(0,0,0,0.25)';
+    badge.style.fontSize = '16px';
+    badge.style.lineHeight = '1';
+    clone.style.position = 'relative';
+    clone.appendChild(badge);
+
+    document.body.appendChild(clone);
+    return clone;
+};
+
 export const SongList: React.FC<SongListProps> = ({
     songs,
     currentSong,
     selectedSong,
     likedSongIds,
     isPlaying,
+    referenceTracks = [],
     onPlay,
     onSelect,
     onToggleLike,
@@ -51,12 +90,19 @@ export const SongList: React.FC<SongListProps> = ({
     onShowDetails,
     onNavigateToProfile,
     onReusePrompt,
-    onDelete
+    onDelete,
+    onDeleteMany,
+    onUseAsReference,
+    onCoverSong,
+    onUseUploadAsReference,
+    onCoverUpload
 }) => {
     const { user } = useAuth();
     const [searchQuery, setSearchQuery] = useState('');
     const [activeFilters, setActiveFilters] = useState<Set<FilterType>>(new Set());
     const [isFilterOpen, setIsFilterOpen] = useState(false);
+    const [isSelecting, setIsSelecting] = useState(false);
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const filterRef = useRef<HTMLDivElement>(null);
 
     // Close filter dropdown when clicking outside
@@ -69,6 +115,18 @@ export const SongList: React.FC<SongListProps> = ({
         document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
+
+    useEffect(() => {
+        setSelectedIds(prev => {
+            if (prev.size === 0) return prev;
+            const validIds = new Set(songs.map(song => song.id));
+            const next = new Set<string>();
+            prev.forEach(id => {
+                if (validIds.has(id)) next.add(id);
+            });
+            return next;
+        });
+    }, [songs]);
 
     const toggleFilter = (filterId: FilterType) => {
         setActiveFilters(prev => {
@@ -103,6 +161,39 @@ export const SongList: React.FC<SongListProps> = ({
             return true;
         });
     }, [songs, searchQuery, activeFilters, likedSongIds]);
+
+    const filteredUploads = useMemo(() => {
+        if (activeFilters.size > 0) return [];
+        if (!referenceTracks.length) return [];
+        return referenceTracks.filter(track => {
+            const title = track.filename.replace(/\.[^/.]+$/, '');
+            return title.toLowerCase().includes(searchQuery.toLowerCase());
+        });
+    }, [referenceTracks, searchQuery, activeFilters]);
+
+    const listItems = useMemo(() => {
+        const songItems = filteredSongs.map(song => ({
+            type: 'song' as const,
+            id: song.id,
+            createdAt: song.createdAt,
+            song
+        }));
+        const uploadItems = filteredUploads.map(track => ({
+            type: 'upload' as const,
+            id: track.id,
+            createdAt: new Date(track.created_at || Date.now()),
+            track
+        }));
+        return [...songItems, ...uploadItems].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    }, [filteredSongs, filteredUploads]);
+
+    const selectableSongs = useMemo(
+        () => filteredSongs.filter(song => !song.isGenerating),
+        [filteredSongs]
+    );
+
+    const allSelected = selectableSongs.length > 0 && selectableSongs.every(song => selectedIds.has(song.id));
+    const selectedSongs = selectableSongs.filter(song => selectedIds.has(song.id));
 
     return (
         <div className="flex-1 bg-white dark:bg-black h-full overflow-y-auto custom-scrollbar p-6 pb-32 transition-colors duration-300">
@@ -175,12 +266,62 @@ export const SongList: React.FC<SongListProps> = ({
                                 </div>
                             )}
                         </div>
+
+                        <button
+                            onClick={() => {
+                                setIsSelecting(prev => !prev);
+                                setSelectedIds(new Set());
+                            }}
+                            className={`border text-xs font-bold px-4 py-2.5 rounded-lg flex items-center gap-2 transition-all select-none ${isSelecting
+                                    ? 'bg-zinc-900 dark:bg-white text-white dark:text-black border-transparent'
+                                    : 'bg-zinc-100 dark:bg-[#121214] hover:bg-zinc-200 dark:hover:bg-white/5 border-zinc-200 dark:border-white/10 text-zinc-700 dark:text-white'
+                                }`}
+                        >
+                            Select
+                        </button>
                     </div>
+
+                    {isSelecting && (
+                        <div className="flex items-center justify-between gap-3 rounded-xl border border-zinc-200 dark:border-white/10 bg-zinc-50 dark:bg-white/5 px-4 py-3">
+                            <div className="text-sm text-zinc-600 dark:text-zinc-300">
+                                {selectedSongs.length} selected
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={() => {
+                                        const next = new Set<string>();
+                                        if (!allSelected) {
+                                            selectableSongs.forEach(song => next.add(song.id));
+                                        }
+                                        setSelectedIds(next);
+                                    }}
+                                    className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-zinc-200 dark:border-white/10 text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 dark:hover:border-white/20"
+                                >
+                                    {allSelected ? 'Clear all' : 'Select all'}
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        if (!selectedSongs.length) return;
+                                        onDeleteMany?.(selectedSongs);
+                                        setSelectedIds(new Set());
+                                        setIsSelecting(false);
+                                    }}
+                                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold border ${selectedSongs.length
+                                            ? 'border-red-500 text-red-600 hover:bg-red-50 dark:hover:bg-red-500/10'
+                                            : 'border-zinc-200 dark:border-white/10 text-zinc-400 cursor-not-allowed'
+                                        }`}
+                                    disabled={!selectedSongs.length}
+                                >
+                                    Delete
+                                </button>
+                            </div>
+                        </div>
+                    )}
                 </div>
 
                 {/* List */}
                 <div className="space-y-2"> {/* Reduced vertical spacing */}
-                    {filteredSongs.length === 0 ? (
+                    {listItems.length === 0 ? (
                         <div className="flex flex-col items-center justify-center h-64 text-zinc-500 space-y-4 border border-dashed border-zinc-200 dark:border-white/5 rounded-2xl bg-zinc-50 dark:bg-white/[0.02]">
                             <div className="w-16 h-16 rounded-full bg-zinc-100 dark:bg-white/5 flex items-center justify-center">
                                 <Filter size={32} />
@@ -194,25 +335,61 @@ export const SongList: React.FC<SongListProps> = ({
                             </button>
                         </div>
                     ) : (
-                        filteredSongs.map((song) => (
-                            <SongItem
-                                key={song.id}
-                                song={song}
-                                isCurrent={currentSong?.id === song.id}
-                                isSelected={selectedSong?.id === song.id}
-                                isLiked={likedSongIds.has(song.id)}
-                                isPlaying={isPlaying}
-                                isOwner={user?.id === song.userId}
-                                onPlay={() => onPlay(song)}
-                                onSelect={() => onSelect(song)}
-                                onToggleLike={() => onToggleLike(song.id)}
-                                onAddToPlaylist={() => onAddToPlaylist(song)}
-                                onOpenVideo={() => onOpenVideo && onOpenVideo(song)}
-                                onShowDetails={() => onShowDetails && onShowDetails(song)}
-                                onNavigateToProfile={onNavigateToProfile}
-                                onReusePrompt={() => onReusePrompt?.(song)}
-                                onDelete={() => onDelete?.(song)}
-                            />
+                        listItems.map((item) => (
+                            item.type === 'song' ? (
+                                <SongItem
+                                    key={item.id}
+                                    song={item.song}
+                                    isCurrent={currentSong?.id === item.song.id}
+                                    isSelected={selectedSong?.id === item.song.id}
+                                    isSelectionMode={isSelecting}
+                                    isChecked={selectedIds.has(item.song.id)}
+                                    isLiked={likedSongIds.has(item.song.id)}
+                                    isPlaying={isPlaying}
+                                    isOwner={user?.id === item.song.userId}
+                                    onPlay={() => onPlay(item.song)}
+                                    onSelect={() => onSelect(item.song)}
+                                    onToggleSelect={() => {
+                                        if (item.song.isGenerating) return;
+                                        setSelectedIds(prev => {
+                                            const next = new Set(prev);
+                                            if (next.has(item.song.id)) next.delete(item.song.id);
+                                            else next.add(item.song.id);
+                                            return next;
+                                        });
+                                    }}
+                                    onToggleLike={() => onToggleLike(item.song.id)}
+                                    onAddToPlaylist={() => onAddToPlaylist(item.song)}
+                                    onOpenVideo={() => onOpenVideo && onOpenVideo(item.song)}
+                                    onShowDetails={() => onShowDetails && onShowDetails(item.song)}
+                                    onNavigateToProfile={onNavigateToProfile}
+                                    onReusePrompt={() => onReusePrompt?.(item.song)}
+                                    onDelete={() => onDelete?.(item.song)}
+                                    onUseAsReference={() => onUseAsReference?.(item.song)}
+                                    onCoverSong={() => onCoverSong?.(item.song)}
+                                />
+                            ) : (
+                                <UploadItem
+                                    key={`upload_${item.id}`}
+                                    track={item.track}
+                                    onPlay={(audioUrl, title) => {
+                                        onPlay({
+                                            id: `upload_${item.id}`,
+                                            title,
+                                            lyrics: '',
+                                            style: 'Upload',
+                                            coverUrl: '',
+                                            duration: '0:00',
+                                            createdAt: item.createdAt,
+                                            tags: [],
+                                            audioUrl,
+                                            isPublic: false,
+                                        } as Song);
+                                    }}
+                                    onUseAsReference={() => onUseUploadAsReference?.(item.track)}
+                                    onCoverSong={() => onCoverUpload?.(item.track)}
+                                />
+                            )
                         ))
                     )}
                 </div>
@@ -225,11 +402,14 @@ interface SongItemProps {
     song: Song;
     isCurrent: boolean;
     isSelected: boolean;
+    isSelectionMode: boolean;
+    isChecked: boolean;
     isLiked: boolean;
     isPlaying: boolean;
     isOwner: boolean;
     onPlay: () => void;
     onSelect: () => void;
+    onToggleSelect: () => void;
     onToggleLike: () => void;
     onAddToPlaylist: () => void;
     onOpenVideo?: () => void;
@@ -237,24 +417,31 @@ interface SongItemProps {
     onNavigateToProfile?: (username: string) => void;
     onReusePrompt?: () => void;
     onDelete?: () => void;
+    onUseAsReference?: () => void;
+    onCoverSong?: () => void;
 }
 
 const SongItem: React.FC<SongItemProps> = ({
     song,
     isCurrent,
     isSelected,
+    isSelectionMode,
+    isChecked,
     isLiked,
     isPlaying,
     isOwner,
     onPlay,
     onSelect,
+    onToggleSelect,
     onToggleLike,
     onAddToPlaylist,
     onOpenVideo,
     onShowDetails,
     onNavigateToProfile,
     onReusePrompt,
-    onDelete
+    onDelete,
+    onUseAsReference,
+    onCoverSong
 }) => {
     const [showDropdown, setShowDropdown] = useState(false);
     const [shareModalOpen, setShareModalOpen] = useState(false);
@@ -264,8 +451,47 @@ const SongItem: React.FC<SongItemProps> = ({
         <>
         <div
             onClick={onSelect}
-            className={`group flex items-center gap-4 p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-[#18181b] transition-all cursor-pointer border ${isSelected ? 'bg-zinc-100 dark:bg-[#18181b] border-zinc-200 dark:border-white/10' : 'border-transparent bg-transparent'}`}
+            draggable={Boolean(song.audioUrl) && !song.isGenerating}
+            onDragStart={(e) => {
+                if (!song.audioUrl || song.isGenerating) return;
+                e.dataTransfer.effectAllowed = 'copy';
+                e.dataTransfer.setData('application/x-ace-audio', JSON.stringify({
+                    url: song.audioUrl,
+                    title: song.title || 'Untitled',
+                    source: 'song',
+                }));
+                const preview = createDragPreview(e.currentTarget);
+                const rect = e.currentTarget.getBoundingClientRect();
+                const offsetX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+                const offsetY = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+                e.dataTransfer.setDragImage(preview, offsetX, offsetY);
+                setTimeout(() => {
+                    try {
+                        preview.remove();
+                    } catch {
+                        // ignore
+                    }
+                }, 0);
+            }}
+            className={`group flex items-center gap-4 p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-[#18181b] transition-all cursor-pointer border ${isSelected ? 'bg-zinc-100 dark:bg-[#18181b] border-zinc-200 dark:border-white/10' : 'border-transparent bg-transparent'} ${song.audioUrl && !song.isGenerating ? 'cursor-grab active:cursor-grabbing' : ''}`}
         >
+            {isSelectionMode && (
+                <button
+                    type="button"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleSelect();
+                    }}
+                    className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${isChecked
+                            ? 'bg-pink-600 border-pink-600 text-white'
+                            : 'border-zinc-300 dark:border-zinc-600 text-transparent hover:border-zinc-400 dark:hover:border-zinc-500'
+                        } ${song.isGenerating ? 'opacity-40 cursor-not-allowed' : ''}`}
+                    disabled={song.isGenerating}
+                    aria-pressed={isChecked}
+                >
+                    <Check size={12} strokeWidth={3} className={isChecked ? 'text-white' : 'text-transparent'} />
+                </button>
+            )}
 
             {/* Cover Art - Reduced size */}
             <div className="relative w-16 h-16 flex-shrink-0 rounded-md bg-zinc-200 dark:bg-zinc-800 overflow-hidden shadow-sm group/image">
@@ -355,6 +581,21 @@ const SongItem: React.FC<SongItemProps> = ({
                     <p className="text-xs text-zinc-500 dark:text-zinc-500 line-clamp-2 pt-1 font-medium max-w-2xl">
                         {song.style}
                     </p>
+                    {song.isGenerating && (
+                        <div className="pt-2">
+                            <div className="h-1 rounded-full bg-zinc-200/70 dark:bg-white/10 overflow-hidden">
+                                <div
+                                    className={`h-full bg-gradient-to-r from-pink-500 to-purple-600 transition-all ${song.progress === undefined ? 'opacity-40' : ''}`}
+                                    style={{
+                                        width: `${Math.min(
+                                            100,
+                                            Math.max(0, ((song.progress ?? 0) > 1 ? (song.progress ?? 0) / 100 : (song.progress ?? 0)) * 100)
+                                        )}%`,
+                                    }}
+                                />
+                            </div>
+                        </div>
+                    )}
                 </div>
 
                 {/* Actions Row - Hidden while generating */}
@@ -426,10 +667,12 @@ const SongItem: React.FC<SongItemProps> = ({
                                 onClose={() => setShowDropdown(false)}
                                 isOwner={isOwner}
                                 onCreateVideo={() => onOpenVideo?.(song)}
-                                onReusePrompt={() => onReusePrompt?.(song)}
+                                onReusePrompt={onReusePrompt ? () => onReusePrompt?.(song) : undefined}
                                 onAddToPlaylist={() => onAddToPlaylist?.(song)}
                                 onDelete={() => onDelete?.(song)}
                                 onShare={() => setShareModalOpen(true)}
+                                onUseAsReference={() => onUseAsReference?.()}
+                                onCoverSong={() => onCoverSong?.()}
                             />
                         </div>
                     </div>
@@ -452,5 +695,52 @@ const SongItem: React.FC<SongItemProps> = ({
             song={song}
         />
         </>
+    );
+};
+
+const UploadItem: React.FC<{
+    track: { id: string; filename: string; audio_url: string; duration?: number | null };
+    onPlay: (audioUrl: string, title: string) => void;
+    onUseAsReference?: () => void;
+    onCoverSong?: () => void;
+}> = ({ track, onPlay, onUseAsReference, onCoverSong }) => {
+    const title = track.filename.replace(/\.[^/.]+$/, '');
+    const duration = track.duration
+        ? `${Math.floor(track.duration / 60)}:${String(Math.floor(track.duration % 60)).padStart(2, '0')}`
+        : '--:--';
+    return (
+        <SongItem
+            song={{
+                id: `upload_${track.id}`,
+                title,
+                lyrics: '',
+                style: 'Upload',
+                coverUrl: '',
+                duration,
+                createdAt: new Date(),
+                tags: [],
+                audioUrl: track.audio_url,
+                isPublic: false,
+            } as Song}
+            isCurrent={false}
+            isSelected={false}
+            isSelectionMode={false}
+            isChecked={false}
+            isLiked={false}
+            isPlaying={false}
+            isOwner={false}
+            onPlay={() => onPlay(track.audio_url, title)}
+            onSelect={() => onPlay(track.audio_url, title)}
+            onToggleSelect={() => undefined}
+            onToggleLike={() => undefined}
+            onAddToPlaylist={() => undefined}
+            onOpenVideo={() => undefined}
+            onShowDetails={() => undefined}
+            onNavigateToProfile={() => undefined}
+            onReusePrompt={undefined}
+            onDelete={() => undefined}
+            onUseAsReference={onUseAsReference}
+            onCoverSong={onCoverSong}
+        />
     );
 };

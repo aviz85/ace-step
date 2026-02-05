@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import time
+import torch
 
 # Get ACE-Step path from environment or use default
 ACESTEP_PATH = os.environ.get('ACESTEP_PATH', '/home/ambsd/Desktop/aceui/ACE-Step-1.5')
@@ -27,12 +28,18 @@ def get_llm_handler():
         # Initialize the LLM with the 0.6B model (lighter on VRAM)
         checkpoint_dir = os.path.join(ACESTEP_PATH, "checkpoints")
         lm_model_path = "acestep-5Hz-lm-0.6B"  # Use the smaller 0.6B model
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
 
         status, success = _llm_handler.initialize(
             checkpoint_dir=checkpoint_dir,
             lm_model_path=lm_model_path,
             backend="pt",  # Use PyTorch backend
-            device="cuda",
+            device=device,
             offload_to_cpu=True,
         )
 

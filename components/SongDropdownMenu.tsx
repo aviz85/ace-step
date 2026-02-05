@@ -26,6 +26,8 @@ interface SongDropdownMenuProps {
     onDownload?: () => void;
     onShare?: () => void;
     onDelete?: () => void;
+    onUseAsReference?: () => void;
+    onCoverSong?: () => void;
 }
 
 interface MenuItemProps {
@@ -70,7 +72,9 @@ export const SongDropdownMenu: React.FC<SongDropdownMenuProps> = ({
     onAddToPlaylist,
     onDownload,
     onShare,
-    onDelete
+    onDelete,
+    onUseAsReference,
+    onCoverSong
 }) => {
     const menuRef = useRef<HTMLDivElement>(null);
 
@@ -185,11 +189,29 @@ export const SongDropdownMenu: React.FC<SongDropdownMenuProps> = ({
                 label="Extract Stems"
                 onClick={onExtractStems ? () => handleAction(onExtractStems) : handleExtractStems}
             />
-            <MenuItem
-                icon={<Repeat size={14} />}
-                label="Reuse Prompt"
-                onClick={() => handleAction(onReusePrompt)}
-            />
+            {onReusePrompt && (
+                <MenuItem
+                    icon={<Repeat size={14} />}
+                    label="Reuse Prompt"
+                    onClick={() => handleAction(onReusePrompt)}
+                />
+            )}
+            {onUseAsReference && (
+                <MenuItem
+                    icon={<Layers size={14} />}
+                    label="Use as Reference"
+                    onClick={() => handleAction(onUseAsReference)}
+                    disabled={!song.audioUrl}
+                />
+            )}
+            {onCoverSong && (
+                <MenuItem
+                    icon={<Layers size={14} />}
+                    label="Cover Song"
+                    onClick={() => handleAction(onCoverSong)}
+                    disabled={!song.audioUrl}
+                />
+            )}
 
             <MenuDivider />
 

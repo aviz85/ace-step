@@ -19,6 +19,7 @@ try {
 const dbInstance = new Database(config.database.path);
 dbInstance.pragma('journal_mode = WAL');
 dbInstance.pragma('foreign_keys = ON');
+dbInstance.pragma('busy_timeout = 5000');
 
 export { dbInstance as db };
 

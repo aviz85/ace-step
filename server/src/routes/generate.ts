@@ -4,7 +4,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { pool } from '../db/pool.js';
 import { generateUUID } from '../db/sqlite.js';
+import { config } from '../config/index.js';
 import { authMiddleware, AuthenticatedRequest } from '../middleware/auth.js';
+import { getGradioClient } from '../services/gradio-client.js';
 import {
   generateMusicViaAPI,
   getJobStatus,
@@ -125,7 +127,15 @@ interface GenerateBody {
   isFormatCaption?: boolean;
 }
 
-router.post('/upload-audio', authMiddleware, audioUpload.single('audio'), async (req: AuthenticatedRequest, res: Response) => {
+router.post('/upload-audio', authMiddleware, (req: AuthenticatedRequest, res: Response, next: Function) => {
+  audioUpload.single('audio')(req, res, (err: any) => {
+    if (err) {
+      res.status(400).json({ error: err.message || 'Invalid file upload' });
+      return;
+    }
+    next();
+  });
+}, async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (!req.file) {
       res.status(400).json({ error: 'Audio file is required' });
@@ -161,7 +171,7 @@ router.post('/upload-audio', authMiddleware, audioUpload.single('audio'), async 
     const ext = extFromName || extFromType || '.audio';
     const key = `references/${req.user!.id}/${Date.now()}-${generateUUID()}${ext}`;
     const storedKey = await storage.upload(key, req.file.buffer, req.file.mimetype);
-    const publicUrl = storedKey;
+    const publicUrl = storage.getPublicUrl(storedKey);
 
     res.json({ url: publicUrl, key: storedKey });
   } catch (error) {
@@ -351,6 +361,7 @@ router.get('/status/:jobId', authMiddleware, async (req: AuthenticatedRequest, r
         const aceStatus = await getJobStatus(job.acestep_task_id);
 
         if (aceStatus.status !== job.status) {
+          // Use optimistic lock: only update if status hasn't changed (prevents duplicate song creation)
           let updateQuery = `UPDATE generation_jobs SET status = ?, updated_at = datetime('now')`;
           const updateParams: unknown[] = [aceStatus.status];
 
@@ -362,17 +373,19 @@ router.get('/status/:jobId', authMiddleware, async (req: AuthenticatedRequest, r
             updateParams.push(aceStatus.error);
           }
 
-          updateQuery += ` WHERE id = ?`;
-          updateParams.push(req.params.jobId);
+          updateQuery += ` WHERE id = ? AND status = ?`;
+          updateParams.push(req.params.jobId, job.status);
 
-          await pool.query(updateQuery, updateParams);
+          const updateResult = await pool.query(updateQuery, updateParams);
+          const wasUpdated = updateResult.rowCount > 0;
 
-          // If succeeded, create song records
-          if (aceStatus.status === 'succeeded' && aceStatus.result) {
+          // If succeeded AND we were the first to update (optimistic lock), create song records
+          if (aceStatus.status === 'succeeded' && aceStatus.result && wasUpdated) {
             const params = typeof job.params === 'string' ? JSON.parse(job.params) : job.params;
-            const audioUrls = aceStatus.result.audioUrls.filter((url: string) =>
-              url.endsWith('.mp3') || url.endsWith('.flac')
-            );
+            const audioUrls = aceStatus.result.audioUrls.filter((url: string) => {
+              const lower = url.toLowerCase();
+              return lower.endsWith('.mp3') || lower.endsWith('.flac') || lower.endsWith('.wav');
+            });
             const localPaths: string[] = [];
             const storage = getStorageProvider();
 
@@ -554,6 +567,103 @@ router.get('/endpoints', authMiddleware, async (_req: AuthenticatedRequest, res:
   }
 });
 
+router.get('/models', async (_req, res: Response) => {
+  try {
+    const ACESTEP_DIR = process.env.ACESTEP_PATH || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../ACE-Step-1.5');
+    const checkpointsDir = path.join(ACESTEP_DIR, 'checkpoints');
+
+    // All known DiT models from Gradio's model_downloader.py registry:
+    // - MAIN_MODEL_COMPONENTS includes "acestep-v15-turbo" (bundled with main download)
+    // - SUBMODEL_REGISTRY includes the rest (separate HuggingFace repos, auto-downloaded on init)
+    const ALL_DIT_MODELS = [
+      'acestep-v15-turbo',             // default, from main model repo
+      'acestep-v15-base',              // submodel
+      'acestep-v15-sft',               // submodel
+      'acestep-v15-turbo-shift1',      // submodel
+      'acestep-v15-turbo-shift3',      // submodel
+      'acestep-v15-turbo-continuous',   // submodel
+    ];
+
+    // Query Gradio /v1/models to get the currently loaded/active model
+    let activeModel: string | null = null;
+    try {
+      const apiRes = await fetch(`${config.acestep.apiUrl}/v1/models`);
+      if (apiRes.ok) {
+        const data = await apiRes.json() as any;
+        const gradioModels = data?.data?.models || data?.models || [];
+        if (gradioModels.length > 0) {
+          activeModel = gradioModels[0]?.name || null;
+        }
+      }
+    } catch {
+      // Gradio API unavailable
+    }
+
+    // Check which models are downloaded (exist on disk)
+    // Matches Gradio's handler.py check_model_exists() and get_available_acestep_v15_models()
+    const { existsSync, statSync } = await import('fs');
+    const downloaded = new Set<string>();
+    for (const model of ALL_DIT_MODELS) {
+      const modelPath = path.join(checkpointsDir, model);
+      try {
+        if (existsSync(modelPath) && statSync(modelPath).isDirectory()) {
+          downloaded.add(model);
+        }
+      } catch { /* skip */ }
+    }
+
+    // Also scan for any additional acestep-v15-* models on disk not in the registry
+    // (e.g. user-trained or community models)
+    try {
+      const { readdirSync } = await import('fs');
+      for (const entry of readdirSync(checkpointsDir)) {
+        if (entry.startsWith('acestep-v15-') && statSync(path.join(checkpointsDir, entry)).isDirectory()) {
+          downloaded.add(entry);
+          if (!ALL_DIT_MODELS.includes(entry)) {
+            ALL_DIT_MODELS.push(entry);
+          }
+        }
+      }
+    } catch { /* checkpoints dir may not exist */ }
+
+    const models = ALL_DIT_MODELS.map(name => ({
+      name,
+      is_active: name === activeModel,
+      is_preloaded: downloaded.has(name),
+    }));
+
+    // Sort: active first, then downloaded, then alphabetical
+    models.sort((a, b) => {
+      if (a.is_active !== b.is_active) return a.is_active ? -1 : 1;
+      if (a.is_preloaded !== b.is_preloaded) return a.is_preloaded ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    res.json({ models });
+  } catch (error) {
+    console.error('Models error:', error);
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// GET /api/generate/random-description — Load a random simple description from Gradio
+router.get('/random-description', authMiddleware, async (_req: AuthenticatedRequest, res: Response) => {
+  try {
+    const client = await getGradioClient();
+    const result = await client.predict('/load_random_simple_description', []);
+    const data = result.data as unknown[];
+    // Returns [description, instrumental, vocal_language]
+    res.json({
+      description: data[0] || '',
+      instrumental: data[1] || false,
+      vocalLanguage: data[2] || 'unknown',
+    });
+  } catch (error) {
+    console.error('Random description error:', error);
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
 router.get('/health', async (_req, res: Response) => {
   try {
     const healthy = await checkSpaceHealth();
@@ -566,7 +676,7 @@ router.get('/health', async (_req, res: Response) => {
 router.get('/limits', async (_req, res: Response) => {
   try {
     const { spawn } = await import('child_process');
-    const ACESTEP_DIR = process.env.ACESTEP_PATH || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../ACE-Step-1.5');
+    const ACESTEP_DIR = process.env.ACESTEP_PATH || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../ACE-Step-1.5');
     const __filename = fileURLToPath(import.meta.url);
     const __dirname = path.dirname(__filename);
     const SCRIPTS_DIR = path.join(__dirname, '../../scripts');
@@ -642,7 +752,7 @@ router.post('/format', authMiddleware, async (req: AuthenticatedRequest, res: Re
 
     const { spawn } = await import('child_process');
 
-    const ACESTEP_DIR = process.env.ACESTEP_PATH || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../ACE-Step-1.5');
+    const ACESTEP_DIR = process.env.ACESTEP_PATH || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../ACE-Step-1.5');
     const __filename = fileURLToPath(import.meta.url);
     const __dirname = path.dirname(__filename);
     const SCRIPTS_DIR = path.join(__dirname, '../../scripts');

@@ -40,7 +40,7 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlistId, onBa
                 duration: s.duration,
                 bpm: s.bpm,
                 tags: s.tags || [],
-                isPublic: s.is_public || false,
+                is_public: s.is_public || false,
                 likeCount: s.like_count || 0,
                 viewCount: s.view_count || 0,
                 creator: s.creator,

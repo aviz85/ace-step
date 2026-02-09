@@ -36,21 +36,7 @@ router.post('/', async (req: Request, res: Response) => {
       return;
     }
 
-    // Create table if not exists
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS contact_submissions (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        name VARCHAR(255) NOT NULL,
-        email VARCHAR(255) NOT NULL,
-        subject VARCHAR(500) NOT NULL,
-        message TEXT NOT NULL,
-        category VARCHAR(50) DEFAULT 'general',
-        is_read BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Insert submission
+    // Insert submission (table created in migrate.ts)
     const result = await pool.query(
       `INSERT INTO contact_submissions (name, email, subject, message, category)
        VALUES ($1, $2, $3, $4, $5)

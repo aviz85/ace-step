@@ -20,6 +20,8 @@ import { List } from 'lucide-react';
 import { PlaylistDetail } from './components/PlaylistDetail';
 import { Toast, ToastType } from './components/Toast';
 import { SearchPage } from './components/SearchPage';
+import { TrainingPanel } from './components/TrainingPanel';
+import { NewsPage } from './components/NewsPage';
 import { ConfirmDialog } from './components/ConfirmDialog';
 
 
@@ -106,6 +108,7 @@ function AppContent() {
   const [reuseData, setReuseData] = useState<{ song: Song, timestamp: number } | null>(null);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const selectedSongRef = useRef<Song | null>(null);
   const currentSongIdRef = useRef<string | null>(null);
   const pendingSeekRef = useRef<number | null>(null);
   const playNextRef = useRef<() => void>(() => {});
@@ -163,6 +166,9 @@ function AppContent() {
       setPlaylists([]);
     }
   }, [token]);
+
+  // Keep selectedSongRef in sync for use in callbacks without stale closures
+  useEffect(() => { selectedSongRef.current = selectedSong; }, [selectedSong]);
 
   // Cleanup active jobs on unmount
   useEffect(() => {
@@ -280,6 +286,8 @@ function AppContent() {
         }
       } else if (path === '/search') {
         setCurrentView('search');
+      } else if (path === '/news') {
+        setCurrentView('news');
       }
     };
 
@@ -622,7 +630,8 @@ function AppContent() {
       });
 
       // If the current selection was a temp/generating song, replace it with newest real song
-      if (selectedSong?.isGenerating || (selectedSong && !loadedSongs.some(s => s.id === selectedSong.id))) {
+      const current = selectedSongRef.current;
+      if (current?.isGenerating || (current && !loadedSongs.some(s => s.id === current.id))) {
         setSelectedSong(loadedSongs[0] ?? null);
       }
     } catch (error) {
@@ -1040,7 +1049,7 @@ function AppContent() {
       if (songToAddToPlaylist) {
         await playlistsApi.addSong(res.playlist.id, songToAddToPlaylist.id, token);
         setSongToAddToPlaylist(null);
-        playlistsApi.getMyPlaylists(token).then(r => setPlaylists(r.playlists));
+        playlistsApi.getMyPlaylists(token).then(r => setPlaylists(r.playlists)).catch(() => {});
       }
       showToast(t('playlistCreated'));
     } catch (error) {
@@ -1060,7 +1069,7 @@ function AppContent() {
       await playlistsApi.addSong(playlistId, songToAddToPlaylist.id, token);
       setSongToAddToPlaylist(null);
       showToast(t('songAddedToPlaylist'));
-      playlistsApi.getMyPlaylists(token).then(r => setPlaylists(r.playlists));
+      playlistsApi.getMyPlaylists(token).then(r => setPlaylists(r.playlists)).catch(() => {});
     } catch (error) {
       console.error('Add song error:', error);
       showToast(t('failedToAddSong'), 'error');
@@ -1212,6 +1221,12 @@ function AppContent() {
           />
         );
 
+      case 'training':
+        return <TrainingPanel />;
+
+      case 'news':
+        return <NewsPage />;
+
       case 'create':
       default:
         return (
@@ -1311,6 +1326,8 @@ function AppContent() {
               window.history.pushState({}, '', '/library');
             } else if (v === 'search') {
               window.history.pushState({}, '', '/search');
+            } else if (v === 'news') {
+              window.history.pushState({}, '', '/news');
             }
             if (isMobile) setShowLeftSidebar(false);
           }}

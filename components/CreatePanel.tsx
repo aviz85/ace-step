@@ -4,7 +4,7 @@ import { GenerationParams, Song } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { useI18n } from '../context/I18nContext';
 import { generateApi } from '../services/api';
-import { MAIN_STYLES, SUB_STYLES } from '../data/genres';
+import { MAIN_STYLES } from '../data/genres';
 import { EditableSlider } from './EditableSlider';
 
 interface ReferenceTrack {
@@ -48,7 +48,12 @@ const KEY_SIGNATURES = [
   'B major', 'B minor'
 ];
 
-const TIME_SIGNATURES = ['', '2/4', '3/4', '4/4', '6/8'];
+const TIME_SIGNATURES = ['', '2', '3', '4', '6', 'N/A'];
+
+const TRACK_NAMES = [
+  'woodwinds', 'brass', 'fx', 'synth', 'strings', 'percussion',
+  'keyboard', 'guitar', 'bass', 'drums', 'backing_vocals', 'vocals',
+];
 
 const VOCAL_LANGUAGE_KEYS = [
   { value: 'unknown', key: 'autoInstrumental' as const },
@@ -215,6 +220,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
   const [showLoraPanel, setShowLoraPanel] = useState(false);
   const [loraPath, setLoraPath] = useState('./lora_output/final/adapter');
   const [loraLoaded, setLoraLoaded] = useState(false);
+  const [loraEnabled, setLoraEnabled] = useState(true);
   const [loraScale, setLoraScale] = useState(1.0);
   const [loraError, setLoraError] = useState<string | null>(null);
   const [isLoraLoading, setIsLoraLoading] = useState(false);
@@ -262,19 +268,6 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
   const isTurboModel = (modelId: string): boolean => {
     return modelId.includes('turbo');
   };
-
-  // Genre selection state (cascading)
-  const [selectedMainGenre, setSelectedMainGenre] = useState<string>('');
-  const [selectedSubGenre, setSelectedSubGenre] = useState<string>('');
-
-  // Filter sub-genres based on selected main genre
-  const filteredSubGenres = useMemo(() => {
-    if (!selectedMainGenre) return [];
-    const mainLower = selectedMainGenre.toLowerCase().trim();
-    return SUB_STYLES.filter(style => 
-      style.toLowerCase().includes(mainLower)
-    );
-  }, [selectedMainGenre]);
 
   const [isUploadingReference, setIsUploadingReference] = useState(false);
   const [isUploadingSource, setIsUploadingSource] = useState(false);
@@ -427,7 +420,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
 
   const handleLoraScaleChange = async (newScale: number) => {
     setLoraScale(newScale);
-    
+
     if (!token || !loraLoaded) return;
 
     try {
@@ -435,6 +428,61 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
     } catch (err) {
       console.error('Failed to set LoRA scale:', err);
     }
+  };
+
+  const handleLoraEnabledToggle = async () => {
+    if (!token || !loraLoaded) return;
+    const newEnabled = !loraEnabled;
+    setLoraEnabled(newEnabled);
+    try {
+      await generateApi.toggleLora({ enabled: newEnabled }, token);
+    } catch (err) {
+      console.error('Failed to toggle LoRA:', err);
+      setLoraEnabled(!newEnabled); // revert on error
+    }
+  };
+
+  // Load generation parameters from JSON file
+  const handleLoadParamsFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target?.result as string);
+        if (data.lyrics !== undefined) setLyrics(data.lyrics);
+        if (data.style !== undefined) setStyle(data.style);
+        if (data.title !== undefined) setTitle(data.title);
+        if (data.caption !== undefined) setStyle(data.caption);
+        if (data.instrumental !== undefined) setInstrumental(data.instrumental);
+        if (data.vocal_language !== undefined) setVocalLanguage(data.vocal_language);
+        if (data.bpm !== undefined) setBpm(data.bpm);
+        if (data.key_scale !== undefined) setKeyScale(data.key_scale);
+        if (data.time_signature !== undefined) setTimeSignature(data.time_signature);
+        if (data.duration !== undefined) setDuration(data.duration);
+        if (data.inference_steps !== undefined) setInferenceSteps(data.inference_steps);
+        if (data.guidance_scale !== undefined) setGuidanceScale(data.guidance_scale);
+        if (data.audio_format !== undefined) setAudioFormat(data.audio_format);
+        if (data.infer_method !== undefined) setInferMethod(data.infer_method);
+        if (data.seed !== undefined) { setSeed(data.seed); setRandomSeed(false); }
+        if (data.shift !== undefined) setShift(data.shift);
+        if (data.lm_temperature !== undefined) setLmTemperature(data.lm_temperature);
+        if (data.lm_cfg_scale !== undefined) setLmCfgScale(data.lm_cfg_scale);
+        if (data.lm_top_k !== undefined) setLmTopK(data.lm_top_k);
+        if (data.lm_top_p !== undefined) setLmTopP(data.lm_top_p);
+        if (data.lm_negative_prompt !== undefined) setLmNegativePrompt(data.lm_negative_prompt);
+        if (data.task_type !== undefined) setTaskType(data.task_type);
+        if (data.audio_codes !== undefined) setAudioCodes(data.audio_codes);
+        if (data.repainting_start !== undefined) setRepaintingStart(data.repainting_start);
+        if (data.repainting_end !== undefined) setRepaintingEnd(data.repainting_end);
+        if (data.instruction !== undefined) setInstruction(data.instruction);
+        if (data.audio_cover_strength !== undefined) setAudioCoverStrength(data.audio_cover_strength);
+      } catch {
+        console.error('Failed to parse parameters JSON');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // reset so same file can be reloaded
   };
 
   // Reuse Effect - must be after all state declarations
@@ -626,28 +674,6 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
   const startResizing = (e: React.MouseEvent) => {
     e.preventDefault();
     setIsResizing(true);
-  };
-
-  const uploadAudio = async (file: File, target: 'reference' | 'source') => {
-    if (!token) {
-      setUploadError('Please sign in to upload audio.');
-      return;
-    }
-    setUploadError(null);
-    const setUploading = target === 'reference' ? setIsUploadingReference : setIsUploadingSource;
-    const setUrl = target === 'reference' ? setReferenceAudioUrl : setSourceAudioUrl;
-    setUploading(true);
-    try {
-      const result = await generateApi.uploadAudio(file, token);
-      setUrl(result.url);
-      setShowAudioModal(false);
-      setTempAudioUrl('');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Upload failed';
-      setUploadError(message);
-    } finally {
-      setUploading(false);
-    }
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>, target: 'reference' | 'source') => {
@@ -1182,8 +1208,28 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
           <div className="space-y-5">
             {/* Song Description */}
             <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
-              <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5">
-                {t('describeYourSong')}
+              <div className="px-3 py-2.5 flex items-center justify-between border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5">
+                <span className="text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  {t('describeYourSong')}
+                </span>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!token) return;
+                    try {
+                      const result = await generateApi.getRandomDescription(token);
+                      setSongDescription(result.description);
+                      setInstrumental(result.instrumental);
+                      setVocalLanguage(result.vocalLanguage || 'unknown');
+                    } catch (err) {
+                      console.error('Failed to load random description:', err);
+                    }
+                  }}
+                  title="Load random description"
+                  className="p-1 rounded-md text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
+                >
+                  <Dices size={14} />
+                </button>
               </div>
               <textarea
                 value={songDescription}
@@ -1194,32 +1240,37 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
             </div>
 
             {/* Vocal Language (Simple) */}
-            <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 overflow-hidden">
-              <div className="px-3 py-2.5 text-xs font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 border-b border-zinc-100 dark:border-white/5 bg-zinc-50 dark:bg-white/5">
-                {t('vocalLanguage')}
-              </div>
-              <div className="flex flex-wrap items-center gap-2 p-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide px-1">
+                  {t('vocalLanguage')}
+                </label>
                 <select
                   value={vocalLanguage}
                   onChange={(e) => setVocalLanguage(e.target.value)}
-                  className="flex-1 min-w-[180px] bg-transparent text-sm text-zinc-900 dark:text-white focus:outline-none"
+                  className="w-full bg-white dark:bg-suno-card border border-zinc-200 dark:border-white/5 rounded-xl px-3 py-2 text-sm text-zinc-900 dark:text-white focus:outline-none focus:border-pink-500 dark:focus:border-pink-500 transition-colors cursor-pointer [&>option]:bg-white [&>option]:dark:bg-zinc-800 [&>option]:text-zinc-900 [&>option]:dark:text-white"
                 >
                   {VOCAL_LANGUAGE_KEYS.map(lang => (
-                    <option key={lang.value} value={lang.value}>{lang.key}</option>
+                    <option key={lang.value} value={lang.value}>{t(lang.key)}</option>
                   ))}
                 </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide px-1">
+                  {t('vocalGender')}
+                </label>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => setVocalGender(vocalGender === 'male' ? '' : 'male')}
-                    className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${vocalGender === 'male' ? 'bg-pink-600 text-white border-pink-600' : 'border-zinc-200 dark:border-white/10 text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 dark:hover:border-white/20'}`}
+                    className={`flex-1 px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${vocalGender === 'male' ? 'bg-pink-600 text-white border-pink-600' : 'border-zinc-200 dark:border-white/10 text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 dark:hover:border-white/20'}`}
                   >
                     {t('male')}
                   </button>
                   <button
                     type="button"
                     onClick={() => setVocalGender(vocalGender === 'female' ? '' : 'female')}
-                    className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${vocalGender === 'female' ? 'bg-pink-600 text-white border-pink-600' : 'border-zinc-200 dark:border-white/10 text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 dark:hover:border-white/20'}`}
+                    className={`flex-1 px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${vocalGender === 'female' ? 'bg-pink-600 text-white border-pink-600' : 'border-zinc-200 dark:border-white/10 text-zinc-600 dark:text-zinc-300 hover:border-zinc-300 dark:hover:border-white/20'}`}
                   >
                     {t('female')}
                   </button>
@@ -1239,7 +1290,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                 label={t('duration')}
                 value={duration}
                 min={-1}
-                max={600}
+                max={activeMaxDuration}
                 step={5}
                 onChange={setDuration}
                 formatDisplay={(val) => val === -1 ? t('auto') : `${val}${t('seconds')}`}
@@ -1584,70 +1635,6 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                 className="w-full h-20 bg-transparent p-3 text-sm text-zinc-900 dark:text-white placeholder-zinc-400 dark:placeholder-zinc-600 focus:outline-none resize-none"
               />
               <div className="px-3 pb-3 space-y-3">
-                {/* Cascading Genre Selector */}
-                <div className="space-y-2">
-                  {/* First Level: Main Genre */}
-                  <div className="flex gap-2">
-                    <select
-                      value={selectedMainGenre}
-                      onChange={(e) => {
-                        setSelectedMainGenre(e.target.value);
-                        setSelectedSubGenre(''); // Reset sub genre when main changes
-                        if (e.target.value) {
-                          setStyle(prev => prev ? `${prev}, ${e.target.value}` : e.target.value);
-                        }
-                      }}
-                      className="flex-1 bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-xl px-2 py-1.5 text-xs text-zinc-900 dark:text-white focus:outline-none focus:border-pink-500 dark:focus:border-pink-500 transition-colors cursor-pointer [&>option]:bg-white [&>option]:dark:bg-zinc-800 [&>option]:text-zinc-900 [&>option]:dark:text-white"
-                    >
-                      <option value="">{t('mainGenre')}</option>
-                      {MAIN_STYLES.map(genre => (
-                        <option key={genre} value={genre}>{genre}</option>
-                      ))}
-                    </select>
-                    {selectedMainGenre && (
-                      <button
-                        onClick={() => {
-                          setSelectedMainGenre('');
-                          setSelectedSubGenre('');
-                        }}
-                        className="px-2 py-1.5 text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-white transition-colors"
-                        title={t('cancel')}
-                      >
-                        ✕
-                      </button>
-                    )}
-                  </div>
-                  
-                  {/* Second Level: Sub Genre (only show when main genre is selected) */}
-                  {selectedMainGenre && filteredSubGenres.length > 0 && (
-                    <div className="flex gap-2 pl-4 border-l-2 border-zinc-200 dark:border-white/10">
-                      <select
-                        value={selectedSubGenre}
-                        onChange={(e) => {
-                          setSelectedSubGenre(e.target.value);
-                          if (e.target.value) {
-                            setStyle(prev => prev ? `${prev}, ${e.target.value}` : e.target.value);
-                          }
-                        }}
-                        className="flex-1 bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-xl px-2 py-1.5 text-xs text-zinc-900 dark:text-white focus:outline-none focus:border-pink-500 dark:focus:border-pink-500 transition-colors cursor-pointer [&>option]:bg-white [&>option]:dark:bg-zinc-800 [&>option]:text-zinc-900 [&>option]:dark:text-white"
-                      >
-                        <option value="">{t('subGenre')} ({filteredSubGenres.length})</option>
-                        {filteredSubGenres.map(genre => (
-                          <option key={genre} value={genre}>{genre}</option>
-                        ))}
-                      </select>
-                      {selectedSubGenre && (
-                        <button
-                          onClick={() => setSelectedSubGenre('')}
-                          className="px-2 py-1.5 text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-white transition-colors"
-                          title={t('cancel')}
-                        >
-                          ✕
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
                 {/* Quick Tags */}
                 <div className="flex flex-wrap gap-2">
                   {musicTags.map(tag => (
@@ -1799,13 +1786,27 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                   )}
                 </div>
 
+                {/* Use LoRA Checkbox (enable/disable without unloading) */}
+                <div className={`flex items-center justify-between py-2 border-t border-zinc-100 dark:border-white/5 ${!loraLoaded ? 'opacity-40 pointer-events-none' : ''}`}>
+                  <label className="flex items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-400 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={loraEnabled}
+                      onChange={handleLoraEnabledToggle}
+                      disabled={!loraLoaded}
+                      className="accent-pink-600"
+                    />
+                    Use LoRA
+                  </label>
+                </div>
+
                 {/* LoRA Scale Slider */}
-                <div className={!loraLoaded ? 'opacity-40 pointer-events-none' : ''}>
+                <div className={!loraLoaded || !loraEnabled ? 'opacity-40 pointer-events-none' : ''}>
                   <EditableSlider
                     label={t('loraScale')}
                     value={loraScale}
                     min={0}
-                    max={2}
+                    max={1}
                     step={0.05}
                     onChange={handleLoraScaleChange}
                     formatDisplay={(val) => val.toFixed(2)}
@@ -1881,6 +1882,17 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
 
         {showAdvanced && (
           <div className="bg-white dark:bg-suno-card rounded-xl border border-zinc-200 dark:border-white/5 p-4 space-y-4">
+            {/* Load Parameters from JSON */}
+            <label className="flex items-center gap-2 px-3 py-2 rounded-lg border border-dashed border-zinc-300 dark:border-white/15 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-white/5 cursor-pointer transition-colors">
+              <Upload size={14} />
+              Load Parameters (JSON)
+              <input
+                type="file"
+                accept=".json"
+                onChange={handleLoadParamsFile}
+                className="hidden"
+              />
+            </label>
 
             {/* Duration */}
             <EditableSlider
@@ -1937,8 +1949,8 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
             <EditableSlider
               label={t('inferenceSteps')}
               value={inferenceSteps}
-              min={4}
-              max={32}
+              min={1}
+              max={isTurboModel(selectedModel) ? 20 : 200}
               step={1}
               onChange={setInferenceSteps}
               helpText={t('moreStepsBetterQuality')}
@@ -1951,7 +1963,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
               value={guidanceScale}
               min={1}
               max={15}
-              step={0.5}
+              step={0.1}
               onChange={setGuidanceScale}
               formatDisplay={(val) => val.toFixed(1)}
               helpText={t('howCloselyFollowPrompt')}
@@ -2098,8 +2110,8 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                   value={lmTemperature}
                   min={0}
                   max={2}
-                  step={0.05}
-                  onChange={(e) => setLmTemperature(Number(e.target.value))}
+                  step={0.1}
+                  onChange={setLmTemperature}
                   formatDisplay={(val) => val.toFixed(2)}
                   helpText={t('higherMoreRandom')}
                   title="Higher temperature = more random word choices."
@@ -2167,6 +2179,33 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                 placeholder={t('optionalAudioCodes')}
                 className="w-full h-16 bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg p-2 text-xs text-zinc-900 dark:text-white focus:outline-none resize-none"
               />
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    // Convert source audio to LM codes — requires Gradio lambda (not exposed as API)
+                    // This is a placeholder: Gradio's convert_src_audio_to_codes_wrapper is not a named endpoint
+                    console.log('Convert to Codes: requires source audio upload. Use Gradio UI for this feature.');
+                  }}
+                  disabled={!sourceAudioUrl}
+                  title="Convert source audio to LM codes (requires source audio)"
+                  className="px-2 py-1 rounded text-[10px] font-medium bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  Convert to Codes
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    // Transcribe audio codes to metadata — requires Gradio lambda (not exposed as API)
+                    console.log('Transcribe: requires audio codes. Use Gradio UI for this feature.');
+                  }}
+                  disabled={!audioCodes.trim()}
+                  title="Transcribe audio codes to metadata (requires audio codes)"
+                  className="px-2 py-1 rounded text-[10px] font-medium bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  Transcribe
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -2187,7 +2226,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                 <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400" title="How strongly the source audio shapes the result.">{t('audioCoverStrength')}</label>
                 <input
                   type="number"
-                  step="0.05"
+                  step="0.01"
                   min="0"
                   max="1"
                   value={audioCoverStrength}
@@ -2238,7 +2277,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                 <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400" title="Fraction of the diffusion process to start applying guidance.">{t('cfgIntervalStart')}</label>
                 <input
                   type="number"
-                  step="0.05"
+                  step="0.01"
                   min="0"
                   max="1"
                   value={cfgIntervalStart}
@@ -2250,7 +2289,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                 <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400" title="Fraction of the diffusion process to stop applying guidance.">{t('cfgIntervalEnd')}</label>
                 <input
                   type="number"
-                  step="0.05"
+                  step="0.01"
                   min="0"
                   max="1"
                   value={cfgIntervalEnd}
@@ -2276,7 +2315,9 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                 <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400" title="Scales score-based guidance (advanced).">{t('scoreScale')}</label>
                 <input
                   type="number"
-                  step="0.05"
+                  step="0.01"
+                  min="0.01"
+                  max="1"
                   value={scoreScale}
                   onChange={(e) => setScoreScale(Number(e.target.value))}
                   className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-900 dark:text-white focus:outline-none"
@@ -2287,6 +2328,8 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                 <input
                   type="number"
                   min="1"
+                  max="32"
+                  step="1"
                   value={lmBatchChunkSize}
                   onChange={(e) => setLmBatchChunkSize(Number(e.target.value))}
                   className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-900 dark:text-white focus:outline-none"
@@ -2296,24 +2339,42 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
 
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">{t('trackName')}</label>
-              <input
-                type="text"
+              <select
                 value={trackName}
                 onChange={(e) => setTrackName(e.target.value)}
-                placeholder={t('optionalTrackName')}
-                className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-900 dark:text-white focus:outline-none"
-              />
+                className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-2 py-1.5 text-xs text-zinc-900 dark:text-white focus:outline-none cursor-pointer [&>option]:bg-white [&>option]:dark:bg-zinc-800"
+              >
+                <option value="">None</option>
+                {TRACK_NAMES.map(name => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </select>
             </div>
 
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">{t('completeTrackClasses')}</label>
-              <input
-                type="text"
-                value={completeTrackClasses}
-                onChange={(e) => setCompleteTrackClasses(e.target.value)}
-                placeholder={t('trackClassesPlaceholder')}
-                className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-900 dark:text-white focus:outline-none"
-              />
+              <div className="flex flex-wrap gap-2">
+                {TRACK_NAMES.map(name => {
+                  const selected = completeTrackClasses.split(',').map(s => s.trim()).filter(Boolean);
+                  const isChecked = selected.includes(name);
+                  return (
+                    <label key={name} className="flex items-center gap-1 text-[10px] font-medium text-zinc-500 dark:text-zinc-400 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => {
+                          const next = isChecked
+                            ? selected.filter(s => s !== name)
+                            : [...selected, name];
+                          setCompleteTrackClasses(next.join(','));
+                        }}
+                        className="accent-pink-600"
+                      />
+                      {name}
+                    </label>
+                  );
+                })}
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-3">

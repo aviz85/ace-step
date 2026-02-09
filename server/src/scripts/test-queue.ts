@@ -31,9 +31,11 @@ async function main() {
         tier: job.tier as 'free' | 'pro' | 'unlimited',
         createdAt: Date.now(),
         params: {
+          customMode: true,
           lyrics: 'test',
           style: 'test',
           title: 'test',
+          instrumental: false,
           duration: 30,
         },
         run: async () => {

@@ -7,7 +7,8 @@ export const translations = {
     library: 'Library',
     search: 'Search',
     training: 'Training',
-    
+    news: 'News',
+
     // Theme
     lightMode: 'Light Mode',
     darkMode: 'Dark Mode',
@@ -601,7 +602,8 @@ export const translations = {
     library: '音乐库',
     search: '搜索',
     training: '训练',
-    
+    news: '新闻',
+
     // Theme
     lightMode: '浅色模式',
     darkMode: '深色模式',
@@ -1195,7 +1197,8 @@ export const translations = {
     library: 'ライブラリ',
     search: '検索',
     training: 'トレーニング',
-    
+    news: 'ニュース',
+
     // Theme
     lightMode: 'ライトモード',
     darkMode: 'ダークモード',
@@ -1789,7 +1792,8 @@ export const translations = {
     library: '라이브러리',
     search: '검색',
     training: '훈련',
-    
+    news: '뉴스',
+
     // Theme
     lightMode: '라이트 모드',
     darkMode: '다크 모드',

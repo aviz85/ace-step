@@ -34,8 +34,8 @@ function resolveAceStepPath(): string {
   if (envPath) {
     return path.isAbsolute(envPath) ? envPath : path.resolve(process.cwd(), envPath);
   }
-  // Default: sibling directory
-  return path.resolve(__dirname, '../../../../ACE-Step-1.5');
+  // Default: sibling directory (server/src/services -> ../../../ACE-Step-1.5 = app/ACE-Step-1.5)
+  return path.resolve(__dirname, '../../../ACE-Step-1.5');
 }
 
 // Resolve Python path cross-platform (supports venv and portable installations)
@@ -54,11 +54,22 @@ export function resolvePythonPath(baseDir: string): string {
     return portablePath;
   }
 
-  // Standard venv path (different structure on Windows vs Unix)
-  if (isWindows) {
-    return path.join(baseDir, '.venv', 'Scripts', pythonExe);
+  // Check common venv directory names (Pinokio uses 'env', others use '.venv' or 'venv')
+  const venvDirs = ['env', '.venv', 'venv'];
+  for (const venvDir of venvDirs) {
+    const venvPython = isWindows
+      ? path.join(baseDir, venvDir, 'Scripts', pythonExe)
+      : path.join(baseDir, venvDir, 'bin', 'python');
+    if (existsSync(venvPython)) {
+      return venvPython;
+    }
   }
-  return path.join(baseDir, '.venv', 'bin', 'python');
+
+  // Fallback to first option (will produce a clear error if not found)
+  if (isWindows) {
+    return path.join(baseDir, 'env', 'Scripts', pythonExe);
+  }
+  return path.join(baseDir, 'env', 'bin', 'python');
 }
 
 const ACESTEP_DIR = resolveAceStepPath();
@@ -99,7 +110,11 @@ async function prepareAudioFile(audioUrl: string | undefined): Promise<unknown> 
   try {
     const buffer = await readFile(filePath);
     const ext = path.extname(filePath).toLowerCase();
-    const mimeType = ext === '.flac' ? 'audio/flac' : ext === '.wav' ? 'audio/wav' : 'audio/mpeg';
+    const mimeMap: Record<string, string> = {
+      '.flac': 'audio/flac', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
+      '.opus': 'audio/opus', '.m4a': 'audio/mp4', '.mp4': 'audio/mp4',
+    };
+    const mimeType = mimeMap[ext] || 'audio/mpeg';
     const blob = new Blob([buffer], { type: mimeType });
     return handle_file(blob);
   } catch (error) {
@@ -113,7 +128,7 @@ async function prepareAudioFile(audioUrl: string | undefined): Promise<unknown> 
 }
 
 /**
- * Build the 45 positional arguments for the Gradio /generation_wrapper endpoint.
+ * Build the 50 positional arguments for the Gradio /generation_wrapper endpoint.
  */
 async function buildGradioArgs(params: GenerationParams): Promise<unknown[]> {
   const caption = params.style || 'pop music';
@@ -138,7 +153,7 @@ async function buildGradioArgs(params: GenerationParams): Promise<unknown[]> {
     String(params.seed ?? -1),                                    //  9: Seed
     referenceAudio,                                               // 10: Reference Audio (filepath | null)
     params.duration && params.duration > 0 ? params.duration : -1, // 11: Audio Duration (-1 = auto)
-    params.batchSize ?? 1,                                        // 12: Batch Size
+    Math.min(Math.max(params.batchSize ?? 1, 1), 16),            // 12: Batch Size (clamped 1-16)
     sourceAudio,                                                  // 13: Source Audio (filepath | null)
     params.audioCodes || '',                                      // 14: LM Codes Hints
     params.repaintingStart ?? 0.0,                                // 15: Repainting Start
@@ -162,15 +177,20 @@ async function buildGradioArgs(params: GenerationParams): Promise<unknown[]> {
     isThinking ? (params.useCotMetas ?? true) : false,            // 33: CoT Metas
     isThinking ? (params.useCotCaption ?? true) : false,          // 34: CaptionRewrite
     isThinking ? (params.useCotLanguage ?? true) : false,         // 35: CoT Language
-    params.constrainedDecodingDebug ?? false,                     // 36: Constrained Decoding Debug
-    params.allowLmBatch ?? true,                                  // 37: ParallelThinking
-    params.getScores ?? false,                                    // 38: Auto Score
-    params.getLrc ?? false,                                       // 39: Auto LRC
-    params.scoreScale ?? 0.5,                                     // 40: Quality Score Sensitivity
-    params.lmBatchChunkSize ?? 8,                                 // 41: LM Batch Chunk Size
-    params.trackName || '',                                       // 42: Track Name
-    params.completeTrackClasses || [],                            // 43: Track Names
-    params.autogen ?? false,                                      // 44: AutoGen
+    params.isFormatCaption ?? false,                              // 36: Is Format Caption State
+    params.constrainedDecodingDebug ?? false,                     // 37: Constrained Decoding Debug
+    params.allowLmBatch ?? true,                                  // 38: ParallelThinking
+    params.getScores ?? false,                                    // 39: Auto Score
+    params.getLrc ?? false,                                       // 40: Auto LRC
+    params.scoreScale ?? 0.5,                                     // 41: Quality Score Sensitivity
+    params.lmBatchChunkSize ?? 8,                                 // 42: LM Batch Chunk Size
+    params.trackName || null,                                     // 43: Track Name
+    params.completeTrackClasses || [],                            // 44: Track Names
+    params.autogen ?? false,                                      // 45: AutoGen
+    0,                                                            // 46: Current Batch Index
+    1,                                                            // 47: Total Batches
+    [],                                                           // 48: Batch Queue
+    {},                                                           // 49: Generation Params State
   ];
 }
 
@@ -191,14 +211,20 @@ async function downloadGradioAudioFile(
     return;
   }
 
-  // Fall back to HTTP download via Gradio URL
+  // Fall back to HTTP download via Gradio URL (use temp file for atomicity)
   if (fileObj.url) {
     const response = await fetch(fileObj.url);
     if (!response.ok) {
       throw new Error(`Failed to download Gradio audio: ${response.status}`);
     }
     const buffer = Buffer.from(await response.arrayBuffer());
-    await writeFile(destPath, buffer);
+    if (buffer.length === 0) {
+      throw new Error('Downloaded audio file is empty');
+    }
+    const tmpPath = destPath + '.tmp';
+    await writeFile(tmpPath, buffer);
+    const { rename } = await import('fs/promises');
+    await rename(tmpPath, destPath);
     return;
   }
 
@@ -318,6 +344,9 @@ interface ActiveJob {
 }
 
 const activeJobs = new Map<string, ActiveJob>();
+
+// Periodic cleanup of old jobs (every 10 minutes, remove jobs older than 1 hour)
+setInterval(() => cleanupOldJobs(3600000), 600000);
 
 // Job queue for sequential processing (GPU can only handle one job at a time)
 const jobQueue: string[] = [];
@@ -452,6 +481,10 @@ async function processGenerationViaGradio(
   // predict() blocks until generation is complete
   const result = await client.predict('/generation_wrapper', args);
   const data = result.data as unknown[];
+
+  if (!Array.isArray(data) || data.length === 0) {
+    throw new Error(`Gradio returned unexpected data format: ${typeof data}`);
+  }
 
   // Extract audio files from the result
   // Outputs 0-7: individual audio samples (filepath objects)
@@ -696,7 +729,7 @@ interface PythonResult {
   error?: string;
 }
 
-function runPythonGeneration(scriptArgs: string[]): Promise<PythonResult> {
+function runPythonGeneration(scriptArgs: string[], timeoutMs = 600000): Promise<PythonResult> {
   return new Promise((resolve) => {
     const pythonPath = resolvePythonPath(ACESTEP_DIR);
     const args = [PYTHON_SCRIPT, ...scriptArgs];
@@ -708,6 +741,13 @@ function runPythonGeneration(scriptArgs: string[]): Promise<PythonResult> {
         ACESTEP_PATH: ACESTEP_DIR,
       },
     });
+
+    // Kill process after timeout (default 10 minutes)
+    const timer = setTimeout(() => {
+      proc.kill('SIGTERM');
+      setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
+      resolve({ success: false, error: `Generation timed out after ${timeoutMs / 1000}s` });
+    }, timeoutMs);
 
     let stdout = '';
     let stderr = '';
@@ -727,6 +767,7 @@ function runPythonGeneration(scriptArgs: string[]): Promise<PythonResult> {
     });
 
     proc.on('close', (code) => {
+      clearTimeout(timer);
       if (code !== 0) {
         resolve({ success: false, error: stderr || `Process exited with code ${code}` });
         return;
@@ -749,6 +790,7 @@ function runPythonGeneration(scriptArgs: string[]): Promise<PythonResult> {
     });
 
     proc.on('error', (err) => {
+      clearTimeout(timer);
       resolve({ success: false, error: err.message });
     });
   });
@@ -828,6 +870,20 @@ export async function getAudioStream(audioPath: string): Promise<Response> {
     } catch (err) {
       console.error('Failed to read local audio file:', localPath, err);
       return new Response(null, { status: 404 });
+    }
+  }
+
+  // Absolute path — try reading directly from disk (Gradio output files)
+  if (audioPath.startsWith('/')) {
+    try {
+      const buffer = await readFile(audioPath);
+      const ext = audioPath.endsWith('.flac') ? 'flac' : audioPath.endsWith('.wav') ? 'wav' : 'mpeg';
+      return new Response(buffer, {
+        status: 200,
+        headers: { 'Content-Type': `audio/${ext}` }
+      });
+    } catch {
+      // Fall through to Gradio API
     }
   }
 

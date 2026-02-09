@@ -103,7 +103,6 @@ export const SearchPage: React.FC<SearchPageProps> = ({
             uniqueCreators.set(song.creator, {
               id: song.user_id || song.userId || song.creator,
               username: song.creator,
-              email: '',
               created_at: song.created_at || song.createdAt,
               avatar_url: song.creator_avatar || song.creatorAvatar || null,
             });

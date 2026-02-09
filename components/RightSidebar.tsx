@@ -489,7 +489,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({ song, onClose, onOpe
                                     </span>
                                 ))
                             ) : (
-                                song.style.split(',').map((tag, idx) => (
+                                (song.style || '').split(',').filter(Boolean).map((tag, idx) => (
                                     <span key={idx} className="px-2 py-0.5 bg-zinc-100 dark:bg-white/5 hover:bg-zinc-200 dark:hover:bg-white/10 border border-zinc-200 dark:border-white/10 rounded text-[11px] font-medium text-zinc-600 dark:text-zinc-300 transition-colors">
                                         {tag.trim()}
                                     </span>

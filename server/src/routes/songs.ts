@@ -519,13 +519,9 @@ router.get('/liked/list', authMiddleware, async (req: AuthenticatedRequest, res:
   }
 });
 
-// Toggle song privacy (paid users only can make songs private)
+// Toggle song privacy
 router.patch('/:id/privacy', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    // Get user's account tier
-    const userResult = await pool.query('SELECT account_tier FROM users WHERE id = $1', [req.user!.id]);
-    const accountTier = userResult.rows[0]?.account_tier || 'free';
-
     const check = await pool.query('SELECT user_id, is_public FROM songs WHERE id = $1', [req.params.id]);
     if (check.rows.length === 0) {
       res.status(404).json({ error: 'Song not found' });
@@ -537,12 +533,6 @@ router.patch('/:id/privacy', authMiddleware, async (req: AuthenticatedRequest, r
     }
 
     const newPublicState = !check.rows[0].is_public;
-
-    // Free users cannot make songs private
-    if (accountTier === 'free' && !newPublicState) {
-      res.status(403).json({ error: 'Upgrade to Pro or Unlimited to make songs private' });
-      return;
-    }
 
     await pool.query('UPDATE songs SET is_public = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [
       newPublicState,
